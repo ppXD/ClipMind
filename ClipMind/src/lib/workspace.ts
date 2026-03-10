@@ -14,6 +14,8 @@ import type {
   VideoScene,
   VideoJobRecord,
   VideoJobStep,
+  VoiceoverProjectRecord,
+  VoiceoverSegment,
 } from '../types/workspace';
 
 export const videoProviderKinds: Array<Exclude<keyof StudioSettings['models'], 'transcription'>> = ['summary', 'script', 'tts', 'image'];
@@ -236,6 +238,58 @@ export function createVideoJobSteps(): VideoJobStep[] {
       logs: [],
     },
   }));
+}
+
+export function createVoiceoverProjectRecord({
+  sourceId,
+  sourceTitle,
+  sourceOrigin,
+  videoDurationSec,
+  ttsVendor,
+  ttsModel,
+  language,
+  voice,
+  script,
+  segments,
+}: {
+  sourceId: string;
+  sourceTitle: string;
+  sourceOrigin: string;
+  videoDurationSec: number;
+  ttsVendor: VoiceoverProjectRecord['ttsVendor'];
+  ttsModel: string;
+  language: string;
+  voice: string;
+  script: string;
+  segments: VoiceoverSegment[];
+}): VoiceoverProjectRecord {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id: `voiceover-${globalThis.crypto.randomUUID()}`,
+    title: `${sourceTitle} voiceover`,
+    status: 'draft',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    sourceId,
+    sourceTitle,
+    sourceOrigin,
+    videoDurationSec,
+    ttsVendor,
+    ttsModel,
+    language,
+    voice,
+    script,
+    currentMessage: 'Review segment timing before generating narration.',
+    segments,
+    logs: [
+      {
+        id: `voiceover-log-${globalThis.crypto.randomUUID()}`,
+        createdAt: timestamp,
+        message: `Created voiceover draft with ${segments.length} segment${segments.length > 1 ? 's' : ''}.`,
+      },
+    ],
+  };
 }
 
 export function createSourceId(prefix: SourceKind = 'text'): string {

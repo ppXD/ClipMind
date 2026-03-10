@@ -16,8 +16,7 @@ import type {
   VideoScene,
 } from '../types/workspace';
 
-const ffmpegCoreVersion = '0.12.9';
-const ffmpegBaseUrl = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${ffmpegCoreVersion}/dist/esm`;
+const ffmpegBaseUrl = '/ffmpeg';
 const ffmpegLoadTimeoutMs = 120_000;
 const fallbackSceneCount = 4;
 const maxContextChars = 28_000;
@@ -1175,7 +1174,7 @@ async function generateSceneImage({
   throw new Error(`Image generation is not implemented for ${formatVendorName(vendor)} in browser-only mode.`);
 }
 
-async function generateOpenAiTts({
+export async function generateOpenAiTts({
   apiKey,
   model,
   text,
@@ -1197,7 +1196,7 @@ async function generateOpenAiTts({
   return new Blob([await response.arrayBuffer()], { type: 'audio/wav' });
 }
 
-async function generateAzureSpeechTts({
+export async function generateAzureSpeechTts({
   apiKey,
   region,
   text,
@@ -1249,7 +1248,7 @@ async function generateAzureSpeechTts({
   });
 }
 
-async function generateCantoneseAiTts({
+export async function generateCantoneseAiTts({
   apiKey,
   text,
   language,
@@ -1298,7 +1297,7 @@ async function generateCantoneseAiTts({
   return new Blob([await blob.arrayBuffer()], { type: 'audio/wav' });
 }
 
-async function generateAudiodubTts({
+export async function generateAudiodubTts({
   apiKey,
   text,
   language,
@@ -2020,7 +2019,7 @@ function extractJsonPayload(rawText: string): string {
   return candidate.slice(objectStart, objectEnd + 1);
 }
 
-async function readMediaDurationFromBlob(blob: Blob, fallbackMimeType: string): Promise<number> {
+export async function readMediaDurationFromBlob(blob: Blob, fallbackMimeType: string): Promise<number> {
   const objectUrl = URL.createObjectURL(blob);
   const mediaElement = document.createElement(blob.type.startsWith('video/') ? 'video' : 'audio');
   mediaElement.preload = 'metadata';
@@ -2046,7 +2045,7 @@ async function readMediaDurationFromBlob(blob: Blob, fallbackMimeType: string): 
   }
 }
 
-async function blobToDataUrl(blob: Blob): Promise<string> {
+export async function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -2062,7 +2061,7 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-function dataUrlToUint8Array(dataUrl: string): Uint8Array {
+export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   const [, base64Payload = ''] = dataUrl.split(',');
   const binary = window.atob(base64Payload);
   const bytes = new Uint8Array(binary.length);
@@ -2074,7 +2073,7 @@ function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   return bytes;
 }
 
-async function uint8ArrayToDataAsset(bytes: Uint8Array, mimeType: string): Promise<VideoBinaryAsset> {
+export async function uint8ArrayToDataAsset(bytes: Uint8Array, mimeType: string): Promise<VideoBinaryAsset> {
   const buffer = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(buffer).set(bytes);
   const blob = new Blob([buffer], { type: mimeType });
@@ -2084,9 +2083,9 @@ async function uint8ArrayToDataAsset(bytes: Uint8Array, mimeType: string): Promi
   };
 }
 
-async function loadVideoFfmpeg(onUpdate?: (update: VideoGenerationUpdate) => void, progressRange: ProgressRange = { start: 0, end: 100 }): Promise<FFmpegInstance> {
+export async function loadVideoFfmpeg(onUpdate?: (update: VideoGenerationUpdate) => void, _progressRange: ProgressRange = { start: 0, end: 100 }): Promise<FFmpegInstance> {
   if (!ffmpegInstancePromise) {
-    ffmpegInstancePromise = createVideoFfmpegInstance(onUpdate, progressRange).catch((error) => {
+    ffmpegInstancePromise = createVideoFfmpegInstance(onUpdate).catch((error) => {
       ffmpegInstancePromise = null;
       throw error;
     });
@@ -2103,7 +2102,7 @@ async function loadVideoFfmpeg(onUpdate?: (update: VideoGenerationUpdate) => voi
   return ffmpegInstancePromise;
 }
 
-async function createVideoFfmpegInstance(onUpdate?: (update: VideoGenerationUpdate) => void, progressRange: ProgressRange = { start: 0, end: 100 }): Promise<FFmpegInstance> {
+async function createVideoFfmpegInstance(onUpdate?: (update: VideoGenerationUpdate) => void): Promise<FFmpegInstance> {
   emitJobUpdate(onUpdate, {
     currentMessage: 'Step 6: loading the local ffmpeg runtime. The first run can take 10-30 seconds.',
     log: {
@@ -2113,22 +2112,9 @@ async function createVideoFfmpegInstance(onUpdate?: (update: VideoGenerationUpda
   });
   const { FFmpeg } = await import('@ffmpeg/ffmpeg');
   const ffmpeg = new FFmpeg();
-  const scriptRange = createNestedRange(progressRange, 0.08, 0.44);
-  const wasmRange = createNestedRange(progressRange, 0.44, 0.84);
-  const coreURL = await downloadToBlobUrl(
-    `${ffmpegBaseUrl}/ffmpeg-core.js`,
-    'text/javascript',
-    onUpdate,
-    scriptRange,
-    'Downloading local ffmpeg runtime script.',
-  );
-  const wasmURL = await downloadToBlobUrl(
-    `${ffmpegBaseUrl}/ffmpeg-core.wasm`,
-    'application/wasm',
-    onUpdate,
-    wasmRange,
-    'Downloading local ffmpeg engine.',
-  );
+
+  const coreURL = await fetchToBlobUrl(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript');
+  const wasmURL = await fetchToBlobUrl(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm');
 
   emitJobUpdate(onUpdate, {
     currentMessage: 'Step 6: initializing the local ffmpeg engine.',
@@ -2142,10 +2128,20 @@ async function createVideoFfmpegInstance(onUpdate?: (update: VideoGenerationUpda
     ffmpegLoadTimeoutMs,
     'The local ffmpeg engine did not finish initializing within 2 minutes. Refresh the page or check whether module workers are blocked in this browser.',
   );
+
   return ffmpeg;
 }
 
-async function execFfmpeg(
+async function fetchToBlobUrl(url: string, mimeType: string): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url} (HTTP ${response.status}).`);
+  }
+  const blob = new Blob([await response.arrayBuffer()], { type: mimeType });
+  return URL.createObjectURL(blob);
+}
+
+export async function execFfmpeg(
   ffmpeg: FFmpegInstance,
   args: string[],
   onUpdate: VideoGenerationRequest['onUpdate'],
@@ -2186,50 +2182,6 @@ async function execFfmpeg(
   }
 }
 
-async function downloadToBlobUrl(
-  url: string,
-  mimeType: string,
-  onUpdate?: (update: VideoGenerationUpdate) => void,
-  progressRange: ProgressRange = { start: 0, end: 100 },
-  progressMessage = 'Downloading local ffmpeg assets.',
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url);
-    xhr.responseType = 'blob';
-
-    xhr.addEventListener('progress', (event) => {
-      if (!event.lengthComputable || !event.total) {
-        return;
-      }
-
-      emitJobUpdate(onUpdate, {
-        currentMessage: `${progressMessage} ${Math.round(mapRange(progressRange, event.loaded / event.total))}%`,
-      });
-    });
-
-    xhr.onerror = () => reject(new Error('Unable to download the local ffmpeg engine. Check your network or CDN access.'));
-    xhr.onload = () => {
-      if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`Unable to download the local ffmpeg engine (HTTP ${xhr.status}).`));
-        return;
-      }
-
-      const responseBlob = xhr.response instanceof Blob ? xhr.response : new Blob([xhr.response], { type: mimeType });
-      resolve(URL.createObjectURL(responseBlob));
-    };
-
-    xhr.send();
-  });
-}
-
-function createNestedRange(range: ProgressRange, startRatio: number, endRatio: number): ProgressRange {
-  return {
-    start: mapRange(range, startRatio),
-    end: mapRange(range, endRatio),
-  };
-}
-
 function mapRange(range: ProgressRange, ratio: number): number {
   return range.start + (range.end - range.start) * clamp(ratio, 0, 1);
 }
@@ -2246,11 +2198,11 @@ async function cleanupFiles(ffmpeg: FFmpegInstance, paths: string[]) {
   );
 }
 
-function toUint8Array(data: string | Uint8Array): Uint8Array {
+export function toUint8Array(data: string | Uint8Array): Uint8Array {
   return typeof data === 'string' ? new TextEncoder().encode(data) : data;
 }
 
-function readThrownMessage(error: unknown, fallback: string): string {
+export function readThrownMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
   }
