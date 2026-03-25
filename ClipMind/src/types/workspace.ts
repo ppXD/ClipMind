@@ -2,9 +2,12 @@ export type SourceKind = 'web' | 'file' | 'text';
 
 export type SourceStatus = 'analyzing' | 'ready' | 'failed';
 
-export type ProviderKind = 'summary' | 'script' | 'tts' | 'image' | 'transcription';
+export type SourceMediaKind = 'video' | 'audio';
 
-export type ModelVendor = 'openai' | 'anthropic' | 'google' | 'mistral' | 'cantoneseai' | 'azure' | 'audiodub';
+export type ProviderKind = 'summary' | 'script' | 'tts' | 'image' | 'transcription';
+export type VideoContentMode = 'summary' | 'direct-source';
+
+export type ModelVendor = 'openai' | 'anthropic' | 'google' | 'mistral' | 'cantoneseai' | 'azure' | 'audiodub' | 'minimax';
 
 export type ProviderKeys = Record<ModelVendor, string>;
 
@@ -26,6 +29,8 @@ export type Source = {
   excerpt: string;
   summary: string;
   rawText: string;
+  mediaKind?: SourceMediaKind;
+  mediaDurationSec?: number;
   processingProgress?: number;
   error?: string;
 };
@@ -49,6 +54,7 @@ export type StudioSettings = {
   language: string;
   targetDurationSec: number;
   voice: string;
+  contentMode: VideoContentMode;
   models: Record<ProviderKind, string>;
 };
 
@@ -132,6 +138,11 @@ export type VideoBinaryAsset = {
   dataUrl: string;
 };
 
+export type SourceMediaAsset = VideoBinaryAsset & {
+  kind: SourceMediaKind;
+  durationSec: number;
+};
+
 export type VideoJobRecord = {
   id: string;
   title: string;
@@ -149,4 +160,89 @@ export type VideoJobRecord = {
   narrationAudio?: VideoBinaryAsset;
   previewVideo?: VideoBinaryAsset;
   finalVideo?: VideoBinaryAsset;
+};
+
+export type VoiceoverProjectStatus = 'draft' | 'running' | 'ready' | 'failed';
+
+export type ImageStoryProjectStatus = 'draft' | 'running' | 'ready' | 'failed';
+
+export type VoiceoverSegment = {
+  id: string;
+  text: string;
+  startSec: number;
+  durationSec: number;
+  endSec: number;
+  subtitleText: string;
+  audioClip?: VideoBinaryAsset;
+  audioDurationSec?: number;
+  error?: string;
+};
+
+export type VoiceoverProjectLog = {
+  id: string;
+  message: string;
+  createdAt: string;
+};
+
+export type ImageStoryProjectLog = {
+  id: string;
+  message: string;
+  createdAt: string;
+};
+
+export type VoiceoverProjectRecord = {
+  id: string;
+  title: string;
+  status: VoiceoverProjectStatus;
+  createdAt: string;
+  updatedAt: string;
+  sourceId: string;
+  sourceTitle: string;
+  sourceOrigin: string;
+  videoDurationSec: number;
+  ttsVendor: ModelVendor;
+  ttsModel: string;
+  language: string;
+  voice: string;
+  script: string;
+  currentMessage: string;
+  segments: VoiceoverSegment[];
+  logs: VoiceoverProjectLog[];
+  narrationAudio?: VideoBinaryAsset;
+  previewVideo?: VideoBinaryAsset;
+  finalVideo?: VideoBinaryAsset;
+  error?: string;
+};
+
+export type ImageStoryItem = {
+  id: string;
+  title: string;
+  image: VideoBinaryAsset;
+  text: string;
+  subtitleText?: string;
+  startSec: number;
+  durationSec: number;
+  endSec: number;
+  audioClip?: VideoBinaryAsset;
+  audioDurationSec?: number;
+  error?: string;
+};
+
+export type ImageStoryProjectRecord = {
+  id: string;
+  title: string;
+  status: ImageStoryProjectStatus;
+  createdAt: string;
+  updatedAt: string;
+  language: string;
+  ttsVendor: ModelVendor;
+  ttsModel: string;
+  voice: string;
+  currentMessage: string;
+  items: ImageStoryItem[];
+  logs: ImageStoryProjectLog[];
+  narrationAudio?: VideoBinaryAsset;
+  previewVideo?: VideoBinaryAsset;
+  finalVideo?: VideoBinaryAsset;
+  error?: string;
 };

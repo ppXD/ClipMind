@@ -7,8 +7,7 @@ const transcriptionChunkDurationSec = 10 * 60;
 const directTranscriptionExtensions = new Set(['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'ogg', 'wav', 'webm']);
 const textLikeExtensions = new Set(['csv', 'json', 'markdown', 'md', 'txt']);
 const movExtensions = new Set(['mov', 'qt']);
-const ffmpegCoreVersion = '0.12.9';
-const ffmpegBaseUrl = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${ffmpegCoreVersion}/dist/esm`;
+const ffmpegBaseUrl = '/ffmpeg';
 const ffmpegLoadTimeoutMs = 120_000;
 export type TranscriptionProgress = {
   message: string;
@@ -53,6 +52,10 @@ export function validateTranscriptionFile(file: File): string | null {
   }
 
   return null;
+}
+
+export function shouldChunkTranscription(file: File): boolean {
+  return requiresChunking(file);
 }
 
 export async function transcribeMediaFile({ apiKey, file, model, onProgress }: TranscriptionRequest): Promise<string> {
@@ -289,12 +292,6 @@ function emitProgress(onProgress: TranscriptionRequest['onProgress'], message: s
   });
 }
 
-function createNestedRange(range: ProgressRange, startRatio: number, endRatio: number): ProgressRange {
-  return {
-    start: mapRange(range, startRatio),
-    end: mapRange(range, endRatio),
-  };
-}
 
 function mapRange(range: ProgressRange, ratio: number): number {
   return range.start + (range.end - range.start) * clamp(ratio, 0, 1);
@@ -416,15 +413,14 @@ async function loadFfmpeg(onProgress?: (update: TranscriptionProgress) => void, 
 
 async function createFfmpegInstance(onProgress?: (update: TranscriptionProgress) => void, progressRange: ProgressRange = { start: 0, end: 100 }): Promise<FFmpegInstance> {
   emitProgress(onProgress, 'Loading local media tools. First use may take 10-30 seconds.', progressRange.start);
-  emitProgress(onProgress, 'Preparing local media runtime.', mapRange(progressRange, 0.08));
   const { FFmpeg } = await import('@ffmpeg/ffmpeg');
   const ffmpeg = new FFmpeg();
-  const scriptRange = createNestedRange(progressRange, 0.12, 0.46);
-  const wasmRange = createNestedRange(progressRange, 0.46, 0.86);
-  const coreURL = await downloadToBlobUrl(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript', onProgress, scriptRange, 'Downloading local runtime script.');
-  const wasmURL = await downloadToBlobUrl(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm', onProgress, wasmRange, 'Downloading local media engine.');
 
-  emitProgress(onProgress, 'Initializing local media engine.', mapRange(progressRange, 0.9));
+  emitProgress(onProgress, 'Downloading local media engine.', mapRange(progressRange, 0.1));
+  const coreURL = await fetchToBlobUrl(`${ffmpegBaseUrl}/ffmpeg-core.js`, 'text/javascript');
+  const wasmURL = await fetchToBlobUrl(`${ffmpegBaseUrl}/ffmpeg-core.wasm`, 'application/wasm');
+
+  emitProgress(onProgress, 'Initializing local media engine.', mapRange(progressRange, 0.7));
   await withTimeout(
     ffmpeg.load({ classWorkerURL: ffmpegWorkerUrl, coreURL, wasmURL }),
     ffmpegLoadTimeoutMs,
@@ -434,45 +430,13 @@ async function createFfmpegInstance(onProgress?: (update: TranscriptionProgress)
   return ffmpeg;
 }
 
-async function downloadToBlobUrl(
-  url: string,
-  mimeType: string,
-  onProgress?: (update: TranscriptionProgress) => void,
-  progressRange: ProgressRange = { start: 0, end: 100 },
-  progressMessage = 'Downloading local media tools.',
-): Promise<string> {
-  emitProgress(onProgress, progressMessage, progressRange.start);
-
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url);
-    xhr.responseType = 'blob';
-
-    xhr.addEventListener('progress', (event) => {
-      if (!event.lengthComputable || !event.total) {
-        return;
-      }
-
-      emitProgress(onProgress, progressMessage, mapRange(progressRange, event.loaded / event.total));
-    });
-
-    xhr.onerror = () => {
-      reject(new Error('Unable to download the local media engine. Check your network or CDN access.'));
-    };
-
-    xhr.onload = () => {
-      if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`Unable to download the local media engine (HTTP ${xhr.status}).`));
-        return;
-      }
-
-      const responseBlob = xhr.response instanceof Blob ? xhr.response : new Blob([xhr.response], { type: mimeType });
-      emitProgress(onProgress, progressMessage, progressRange.end);
-      resolve(URL.createObjectURL(responseBlob));
-    };
-
-    xhr.send();
-  });
+async function fetchToBlobUrl(url: string, mimeType: string): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url} (HTTP ${response.status}).`);
+  }
+  const blob = new Blob([await response.arrayBuffer()], { type: mimeType });
+  return URL.createObjectURL(blob);
 }
 
 async function cleanupFfmpegFiles(ffmpeg: FFmpegInstance, paths: string[]): Promise<void> {
@@ -493,17 +457,20 @@ function isDirectTranscriptionFile(file: File): boolean {
 }
 
 function requiresChunking(file: File): boolean {
-  return isVideoFile(file) || file.size > maxDirectTranscriptionFileBytes;
+  if (isMovFile(file)) {
+    return true;
+  }
+
+  if (file.size > maxDirectTranscriptionFileBytes) {
+    return true;
+  }
+
+  return false;
 }
 
 function isMovFile(file: File): boolean {
   const extension = getFileExtension(file.name);
   return file.type === 'video/quicktime' || movExtensions.has(extension);
-}
-
-function isVideoFile(file: File): boolean {
-  const extension = getFileExtension(file.name);
-  return file.type.startsWith('video/') || extension === 'mp4' || extension === 'webm' || movExtensions.has(extension);
 }
 
 function getFileExtension(fileName: string): string {

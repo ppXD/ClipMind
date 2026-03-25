@@ -20,6 +20,7 @@ import {
   FileTextIcon,
   GearIcon,
   GlobeIcon,
+  ImageIcon,
   Link1Icon,
   MagnifyingGlassIcon,
   MagicWandIcon,
@@ -57,6 +58,8 @@ import {
   createSourceRecord,
   createVideoJobRecord,
   createVideoJobSteps,
+  createImageStoryProjectRecord,
+  createVoiceoverProjectRecord,
   defaultProviderRegions,
   defaultProviderKeys,
   defaultStudioSettings,
@@ -69,12 +72,32 @@ import {
   languageOptions,
   modelCatalog,
   providerCatalog,
+  videoContentModeOptions,
   videoGenerationSteps,
   wait,
 } from './lib/workspace';
-import { isSupportedMediaFile, isTextLikeFile, sourceUploadAccept, transcribeMediaFile, validateTranscriptionFile, type TranscriptionProgress } from './lib/transcription';
-import { generateTextWithVendor, runVideoGenerationJob, type VideoGenerationUpdate } from './lib/video-orchestrator';
-import type { JobStatus, ModelVendor, ProviderKind, ProviderKeys, ProviderRegions, Source, SourceKind, StudioSettings, VideoJobRecord } from './types/workspace';
+import { isSupportedMediaFile, isTextLikeFile, shouldChunkTranscription, sourceUploadAccept, transcribeMediaFile, validateTranscriptionFile, type TranscriptionProgress } from './lib/transcription';
+import { blobToDataUrl, loadVideoFfmpeg, toUint8Array, generateTextWithVendor, runVideoGenerationJob, type VideoGenerationUpdate } from './lib/video-orchestrator';
+import { createImageStoryItems, runImageStoryProject, type ImageStoryGenerationUpdate } from './lib/image-story-orchestrator';
+import { createVoiceoverSegments, runVoiceoverProject, type VoiceoverGenerationUpdate } from './lib/voiceover-orchestrator';
+import ImageStoryPreviewEditor from './ImageStoryPreviewEditor';
+import VoiceoverPreviewEditor from './VoiceoverPreviewEditor';
+import type {
+  ImageStoryItem,
+  ImageStoryProjectRecord,
+  JobStatus,
+  ModelVendor,
+  ProviderKind,
+  ProviderKeys,
+  ProviderRegions,
+  Source,
+  SourceKind,
+  SourceMediaAsset,
+  StudioSettings,
+  VideoJobRecord,
+  VoiceoverProjectRecord,
+  VoiceoverSegment,
+} from './types/workspace';
 
 const studioSettingsStorageKey = 'clipmind.studio-settings';
 const providerKeysStorageKey = 'clipmind.provider-keys';
@@ -82,6 +105,9 @@ const providerRegionsStorageKey = 'clipmind.provider-regions';
 const sourcesStorageKey = 'clipmind.sources';
 const activePreviewSourceStorageKey = 'clipmind.active-preview-source';
 const videoJobsStorageKey = 'clipmind.video-jobs';
+const sourceAssetsStorageKey = 'clipmind.source-assets';
+const voiceoverProjectsStorageKey = 'clipmind.voiceover-projects';
+const imageStoryProjectsStorageKey = 'clipmind.image-story-projects';
 const cacheDatabaseName = 'clipmind-cache';
 const cacheStoreName = 'app-state';
 const rotatingHighlights = ['您的文档', '网站'];
@@ -94,8 +120,26 @@ type SourceDraft = {
 };
 
 type PreviewTarget = {
-  kind: 'source' | 'video';
+  kind: 'source' | 'video' | 'voiceover' | 'imagestory';
   id: string;
+};
+
+type VoiceoverDraft = {
+  sourceId: string;
+  script: string;
+};
+
+type ImageStoryDraftItem = {
+  id: string;
+  title: string;
+  text: string;
+  mimeType: string;
+  dataUrl: string;
+};
+
+type ImageStoryDraft = {
+  title: string;
+  items: ImageStoryDraftItem[];
 };
 
 type WebSourceImportResult = {
@@ -115,21 +159,35 @@ function App() {
   const [sources, setSources] = useState<Source[]>(readStoredSources);
   const [isAddSourceDialogOpen, setIsAddSourceDialogOpen] = useState(false);
   const [isVideoStudioDialogOpen, setIsVideoStudioDialogOpen] = useState(false);
+  const [isVoiceoverDialogOpen, setIsVoiceoverDialogOpen] = useState(false);
+  const [isImageStoryDialogOpen, setIsImageStoryDialogOpen] = useState(false);
   const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
   const [isDropZoneActive, setIsDropZoneActive] = useState(false);
   const [isTextComposerOpen, setIsTextComposerOpen] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState(0);
   const [activePreviewTarget, setActivePreviewTarget] = useState<PreviewTarget | null>(readStoredPreviewTarget);
   const [sourceDraft, setSourceDraft] = useState<SourceDraft>({ url: '', title: '', body: '', includeSummary: false });
+  const [voiceoverDraft, setVoiceoverDraft] = useState<VoiceoverDraft>({ sourceId: '', script: '' });
+  const [imageStoryDraft, setImageStoryDraft] = useState<ImageStoryDraft>({ title: '', items: [] });
   const [studioSettings, setStudioSettings] = useState<StudioSettings>(readStoredStudioSettings);
   const [providerKeys, setProviderKeys] = useState<ProviderKeys>(readStoredProviderKeys);
   const [providerRegions, setProviderRegions] = useState<ProviderRegions>(readStoredProviderRegions);
   const [sourceError, setSourceError] = useState('');
   const [videoDialogError, setVideoDialogError] = useState('');
+  const [voiceoverDialogError, setVoiceoverDialogError] = useState('');
+  const [imageStoryDialogError, setImageStoryDialogError] = useState('');
   const [videoJobs, setVideoJobs] = useState<VideoJobRecord[]>([]);
   const [hasHydratedVideoJobs, setHasHydratedVideoJobs] = useState(false);
+  const [sourceAssets, setSourceAssets] = useState<Record<string, SourceMediaAsset>>({});
+  const [hasHydratedSourceAssets, setHasHydratedSourceAssets] = useState(false);
+  const [voiceoverProjects, setVoiceoverProjects] = useState<VoiceoverProjectRecord[]>([]);
+  const [hasHydratedVoiceoverProjects, setHasHydratedVoiceoverProjects] = useState(false);
+  const [imageStoryProjects, setImageStoryProjects] = useState<ImageStoryProjectRecord[]>([]);
+  const [hasHydratedImageStoryProjects, setHasHydratedImageStoryProjects] = useState(false);
   const [sourceDeleteCandidate, setSourceDeleteCandidate] = useState<Source | null>(null);
   const [jobDeleteCandidate, setJobDeleteCandidate] = useState<VideoJobRecord | null>(null);
+  const [voiceoverDeleteCandidate, setVoiceoverDeleteCandidate] = useState<VoiceoverProjectRecord | null>(null);
+  const [imageStoryDeleteCandidate, setImageStoryDeleteCandidate] = useState<ImageStoryProjectRecord | null>(null);
   const [expandedJobIds, setExpandedJobIds] = useState<Record<string, boolean>>({});
   const [expandedStepIds, setExpandedStepIds] = useState<Record<string, boolean>>({});
 
@@ -146,12 +204,39 @@ function App() {
         : null,
     [activePreviewTarget, videoJobs],
   );
+  const activePreviewVoiceoverProject = useMemo(
+    () =>
+      activePreviewTarget?.kind === 'voiceover'
+        ? voiceoverProjects.find((project) => project.id === activePreviewTarget.id) ?? null
+        : null,
+    [activePreviewTarget, voiceoverProjects],
+  );
+  const activePreviewImageStoryProject = useMemo(
+    () =>
+      activePreviewTarget?.kind === 'imagestory'
+        ? imageStoryProjects.find((project) => project.id === activePreviewTarget.id) ?? null
+        : null,
+    [activePreviewTarget, imageStoryProjects],
+  );
+  const activePreviewVoiceoverSourceAsset = useMemo(
+    () => (activePreviewVoiceoverProject ? sourceAssets[activePreviewVoiceoverProject.sourceId] ?? null : null),
+    [activePreviewVoiceoverProject, sourceAssets],
+  );
+  const activePreviewVoiceoverSourceUrl = useObjectUrl(activePreviewVoiceoverSourceAsset?.dataUrl, activePreviewVoiceoverSourceAsset?.mimeType);
+  const activePreviewVoiceoverRenderedUrl = useObjectUrl(activePreviewVoiceoverProject?.previewVideo?.dataUrl, activePreviewVoiceoverProject?.previewVideo?.mimeType);
+  const activePreviewImageStoryRenderedUrl = useObjectUrl(activePreviewImageStoryProject?.previewVideo?.dataUrl, activePreviewImageStoryProject?.previewVideo?.mimeType);
   const activePreviewVideoAsset = useMemo(() => activePreviewVideoJob?.previewVideo ?? activePreviewVideoJob?.finalVideo ?? null, [activePreviewVideoJob]);
   const activePreviewVideoUrl = useObjectUrl(activePreviewVideoAsset?.dataUrl, activePreviewVideoAsset?.mimeType);
   const allReadySelected = readySources.length > 0 && selectedSources.length === readySources.length;
   const hasRunningVideoJob = useMemo(() => videoJobs.some((job) => job.status === 'running'), [videoJobs]);
+  const hasRunningVoiceoverProject = useMemo(() => voiceoverProjects.some((project) => project.status === 'running'), [voiceoverProjects]);
+  const hasRunningImageStoryProject = useMemo(() => imageStoryProjects.some((project) => project.status === 'running'), [imageStoryProjects]);
   const selectedTtsVendor = useMemo(() => getModelVendor('tts', studioSettings.models.tts), [studioSettings.models.tts]);
   const availableVoiceOptions = useMemo(() => getVoiceOptionsForVendor(selectedTtsVendor, studioSettings.language), [selectedTtsVendor, studioSettings.language]);
+  const readyVideoSources = useMemo(
+    () => readySources.filter((source) => source.kind === 'file' && source.mediaKind === 'video' && Boolean(sourceAssets[source.id])),
+    [readySources, sourceAssets],
+  );
 
   useEffect(() => {
     window.localStorage.setItem(studioSettingsStorageKey, JSON.stringify(studioSettings));
@@ -218,6 +303,99 @@ function App() {
   }, [hasHydratedVideoJobs, videoJobs]);
 
   useEffect(() => {
+    let isCancelled = false;
+
+    async function hydrateSourceAssets() {
+      const storedAssets = await readCachedValue<unknown>(sourceAssetsStorageKey);
+
+      if (isCancelled) {
+        return;
+      }
+
+      setSourceAssets(normalizeStoredSourceAssets(storedAssets));
+      setHasHydratedSourceAssets(true);
+    }
+
+    void hydrateSourceAssets();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydratedSourceAssets) {
+      return;
+    }
+
+    void writeCachedValue(sourceAssetsStorageKey, sourceAssets).catch(() => {
+      console.warn('Unable to persist source assets in local cache.');
+    });
+  }, [hasHydratedSourceAssets, sourceAssets]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function hydrateVoiceoverProjects() {
+      const storedProjects = await readCachedValue<unknown>(voiceoverProjectsStorageKey);
+
+      if (isCancelled) {
+        return;
+      }
+
+      setVoiceoverProjects(normalizeStoredVoiceoverProjects(storedProjects));
+      setHasHydratedVoiceoverProjects(true);
+    }
+
+    void hydrateVoiceoverProjects();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydratedVoiceoverProjects) {
+      return;
+    }
+
+    void writeCachedValue(voiceoverProjectsStorageKey, voiceoverProjects).catch(() => {
+      console.warn('Unable to persist voiceover projects in local cache.');
+    });
+  }, [hasHydratedVoiceoverProjects, voiceoverProjects]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function hydrateImageStoryProjects() {
+      const storedProjects = await readCachedValue<unknown>(imageStoryProjectsStorageKey);
+
+      if (isCancelled) {
+        return;
+      }
+
+      setImageStoryProjects(normalizeStoredImageStoryProjects(storedProjects));
+      setHasHydratedImageStoryProjects(true);
+    }
+
+    void hydrateImageStoryProjects();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydratedImageStoryProjects) {
+      return;
+    }
+
+    void writeCachedValue(imageStoryProjectsStorageKey, imageStoryProjects).catch(() => {
+      console.warn('Unable to persist image story projects in local cache.');
+    });
+  }, [hasHydratedImageStoryProjects, imageStoryProjects]);
+
+  useEffect(() => {
     if (!isAddSourceDialogOpen) {
       return;
     }
@@ -238,7 +416,13 @@ function App() {
       (activePreviewTarget.kind === 'source' && !sources.some((source) => source.id === activePreviewTarget.id && source.status === 'ready')) ||
       (activePreviewTarget.kind === 'video' &&
         hasHydratedVideoJobs &&
-        !videoJobs.some((job) => job.id === activePreviewTarget.id && job.status === 'ready' && (job.previewVideo || job.finalVideo)));
+        !videoJobs.some((job) => job.id === activePreviewTarget.id && job.status === 'ready' && (job.previewVideo || job.finalVideo))) ||
+      (activePreviewTarget.kind === 'voiceover' &&
+        hasHydratedVoiceoverProjects &&
+        !voiceoverProjects.some((project) => project.id === activePreviewTarget.id)) ||
+      (activePreviewTarget.kind === 'imagestory' &&
+        hasHydratedImageStoryProjects &&
+        !imageStoryProjects.some((project) => project.id === activePreviewTarget.id));
 
     if (!shouldClearPreviewTarget) {
       return;
@@ -251,7 +435,7 @@ function App() {
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activePreviewTarget, hasHydratedVideoJobs, sources, videoJobs]);
+  }, [activePreviewTarget, hasHydratedVideoJobs, hasHydratedVoiceoverProjects, hasHydratedImageStoryProjects, sources, videoJobs, voiceoverProjects, imageStoryProjects]);
 
   async function handleWebSourceSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -446,6 +630,8 @@ function App() {
     const sourceId = createSourceId('file');
     const isMediaFile = isSupportedMediaFile(file);
     const isPlainTextFile = isTextLikeFile(file);
+    const isVideoFile = isMediaFile && file.type.startsWith('video/');
+    const isAudioFile = isMediaFile && !isVideoFile;
 
     if (!isMediaFile && !isPlainTextFile) {
       setSourceError('This first pass supports text files plus OpenAI-compatible audio and video uploads.');
@@ -468,6 +654,7 @@ function App() {
 
     setSourceError('');
     closeAddSourceDialog();
+
     setSources((currentSources) => [
       {
         id: sourceId,
@@ -478,37 +665,116 @@ function App() {
         selected: false,
         includeSummary: sourceDraft.includeSummary,
         wordCount: 0,
-        excerpt: isMediaFile ? 'Uploading media file for OpenAI transcription.' : 'Reading the uploaded file in browser-only mode.',
+        excerpt: isVideoFile
+          ? 'Preparing video for local preview.'
+          : isAudioFile
+            ? 'Preparing audio for local preview.'
+            : isMediaFile
+              ? 'Uploading media file for OpenAI transcription.'
+              : 'Reading the uploaded file in browser-only mode.',
         summary: sourceDraft.includeSummary ? (isMediaFile ? 'Media source queued for transcription.' : 'File source queued for analysis.') : '',
         rawText: '',
+        mediaKind: isVideoFile ? 'video' : isAudioFile ? 'audio' : undefined,
       },
       ...currentSources,
     ]);
 
     try {
-      const updateSourceProgress = ({ message, progress }: TranscriptionProgress) => {
-        setSources((currentSources) =>
-          currentSources.map((source) =>
-            source.id === sourceId
-              ? {
-                  ...source,
-                  excerpt: message,
-                  summary: source.includeSummary ? (isMediaFile ? 'Media source is being transcribed.' : source.summary) : '',
-                  processingProgress: progress,
-                }
-              : source,
-          ),
-        );
+      let lastProgressUiMessage = '';
+      let lastProgressUiValue = -1;
+      let lastProgressUiAt = 0;
+      const updateSourceProgressUi = (message: string, progress: number, summaryText?: string) => {
+        const nextProgress = clampProgress(progress);
+        const now = Date.now();
+        const messageChanged = message !== lastProgressUiMessage || Boolean(summaryText);
+        const progressChangedEnough = Math.abs(nextProgress - lastProgressUiValue) >= 2;
+        const isTerminal = nextProgress === 0 || nextProgress === 100;
+
+        if (!messageChanged && !isTerminal && !progressChangedEnough && now - lastProgressUiAt < 160) {
+          return;
+        }
+
+        lastProgressUiAt = now;
+        lastProgressUiMessage = message;
+        lastProgressUiValue = nextProgress;
+
+        startTransition(() => {
+          setSources((currentSources) =>
+            currentSources.map((source) =>
+              source.id === sourceId
+                ? {
+                    ...source,
+                    excerpt: message,
+                    summary: source.includeSummary ? (summaryText ?? source.summary) : '',
+                    processingProgress: nextProgress,
+                  }
+                : source,
+            ),
+          );
+        });
       };
 
-      const fileText = isMediaFile
-        ? await transcribeMediaFile({
-            apiKey: providerKeys.openai.trim(),
-            file,
-            model: studioSettings.models.transcription,
-            onProgress: updateSourceProgress,
-          })
-        : await file.text();
+      let mediaAsset: SourceMediaAsset | undefined;
+      const prepareMediaAsset = async (): Promise<SourceMediaAsset | undefined> => {
+        if (!isMediaFile) {
+          return undefined;
+        }
+
+        const updateTranscodeProgress = (message: string, progress: number) => {
+          updateSourceProgressUi(message, progress);
+        };
+
+        const mediaKind: SourceMediaAsset['kind'] = isVideoFile ? 'video' : 'audio';
+        const nextAsset = await createSourceMediaAsset(file, mediaKind, updateTranscodeProgress);
+        setSourceAssets((currentAssets) => ({
+          ...currentAssets,
+          [sourceId]: nextAsset,
+        }));
+
+        startTransition(() => {
+          setSources((currentSources) =>
+            currentSources.map((source) =>
+              source.id === sourceId
+                ? {
+                    ...source,
+                    excerpt: isVideoFile ? 'Video ready for preview. Starting transcription.' : 'Audio ready for preview. Starting transcription.',
+                    mediaDurationSec: nextAsset.durationSec,
+                    mediaKind: nextAsset.kind,
+                  }
+                : source,
+            ),
+          );
+        });
+
+        return nextAsset;
+      };
+
+      const updateSourceProgress = ({ message, progress }: TranscriptionProgress) => {
+        updateSourceProgressUi(message, progress, isMediaFile ? 'Media source is being transcribed.' : undefined);
+      };
+
+      const readFileText = async (): Promise<string> => {
+        return isMediaFile
+          ? await transcribeMediaFile({
+              apiKey: providerKeys.openai.trim(),
+              file,
+              model: studioSettings.models.transcription,
+              onProgress: updateSourceProgress,
+            })
+          : await file.text();
+      };
+
+      let fileText = '';
+      const shouldParallelizeMediaAssetPrep = isVideoFile && !shouldChunkTranscription(file);
+
+      if (shouldParallelizeMediaAssetPrep) {
+        const [preparedAsset, preparedText] = await Promise.all([prepareMediaAsset(), readFileText()]);
+        mediaAsset = preparedAsset;
+        fileText = preparedText;
+      } else {
+        mediaAsset = await prepareMediaAsset();
+        fileText = await readFileText();
+      }
 
       const record = createSourceRecord({
         id: sourceId,
@@ -519,14 +785,19 @@ function App() {
         includeSummary: sourceDraft.includeSummary,
         selected: true,
       });
+      const enrichedRecord: Source = {
+        ...record,
+        mediaKind: mediaAsset?.kind,
+        mediaDurationSec: mediaAsset?.durationSec,
+      };
 
-      const aiSummary = await tryGenerateAiSummary(sourceId, record);
+      const aiSummary = await tryGenerateAiSummary(sourceId, enrichedRecord);
 
       startTransition(() => {
         setSources((currentSources) =>
           currentSources.map((source) =>
             source.id === sourceId
-              ? { ...record, summary: aiSummary || record.summary }
+              ? { ...enrichedRecord, summary: aiSummary || enrichedRecord.summary }
               : source,
           ),
         );
@@ -547,6 +818,11 @@ function App() {
             : source,
         ),
       );
+      setSourceAssets((currentAssets) => {
+        const nextAssets = { ...currentAssets };
+        delete nextAssets[sourceId];
+        return nextAssets;
+      });
     }
   }
 
@@ -705,6 +981,482 @@ function App() {
     downloadBinaryAsset(job.finalVideo, `${slugifyFilename(job.title) || 'clipmind-video'}.mp4`);
   }
 
+  function openVoiceoverDialog() {
+    setVoiceoverDialogError('');
+    setVoiceoverDraft((currentDraft) => ({
+      sourceId: currentDraft.sourceId || readyVideoSources[0]?.id || '',
+      script: currentDraft.script,
+    }));
+    setIsVoiceoverDialogOpen(true);
+  }
+
+  function closeVoiceoverDialog() {
+    setIsVoiceoverDialogOpen(false);
+    setVoiceoverDialogError('');
+  }
+
+  function openImageStoryDialog() {
+    setImageStoryDialogError('');
+    setImageStoryDraft((currentDraft) => ({
+      title: currentDraft.title,
+      items: currentDraft.items,
+    }));
+    setIsImageStoryDialogOpen(true);
+  }
+
+  function closeImageStoryDialog() {
+    setIsImageStoryDialogOpen(false);
+    setImageStoryDialogError('');
+  }
+
+  async function handleImageStoryFilesSelected(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+
+    if (!files.length) {
+      return;
+    }
+
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+
+    if (!imageFiles.length) {
+      setImageStoryDialogError('Upload PNG, JPG, WEBP, or GIF images.');
+      return;
+    }
+
+    const nextItems = await Promise.all(
+      imageFiles.map(async (file) => {
+        const dataUrl = await readFileAsDataUrl(file);
+        return {
+          id: `imagestory-draft-${globalThis.crypto.randomUUID()}`,
+          title: file.name,
+          text: '',
+          mimeType: file.type || 'image/jpeg',
+          dataUrl,
+        } satisfies ImageStoryDraftItem;
+      }),
+    );
+
+    setImageStoryDraft((currentDraft) => ({
+      ...currentDraft,
+      items: [...currentDraft.items, ...nextItems],
+    }));
+    setImageStoryDialogError('');
+  }
+
+  function handleImageStoryDraftItemChange(itemId: string, field: 'title' | 'text', value: string) {
+    setImageStoryDraft((currentDraft) => ({
+      ...currentDraft,
+      items: currentDraft.items.map((item) => (item.id === itemId ? { ...item, [field]: value } : item)),
+    }));
+  }
+
+  function handleRemoveImageStoryDraftItem(itemId: string) {
+    setImageStoryDraft((currentDraft) => ({
+      ...currentDraft,
+      items: currentDraft.items.filter((item) => item.id !== itemId),
+    }));
+  }
+
+  function handleImageStoryProjectPreview(projectId: string) {
+    const project = imageStoryProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project) {
+      return;
+    }
+
+    setActivePreviewTarget((currentTarget) =>
+      currentTarget?.kind === 'imagestory' && currentTarget.id === projectId ? null : { kind: 'imagestory', id: projectId },
+    );
+  }
+
+  function handleCreateImageStoryProject() {
+    if (!imageStoryDraft.items.length) {
+      setImageStoryDialogError('Upload at least one image before creating an image story.');
+      return;
+    }
+
+    const missingTextCount = imageStoryDraft.items.filter((item) => !item.text.trim()).length;
+
+    if (missingTextCount) {
+      setImageStoryDialogError('Add narration text for each image before opening the editor.');
+      return;
+    }
+
+    const items = createImageStoryItems(
+      imageStoryDraft.items.map((item) => ({
+        title: item.title,
+        text: item.text,
+        dataUrl: item.dataUrl,
+        mimeType: item.mimeType,
+      })),
+    );
+
+    if (!items.length) {
+      setImageStoryDialogError('Unable to create image story items from selected files.');
+      return;
+    }
+
+    const project = createImageStoryProjectRecord({
+      title: imageStoryDraft.title.trim() || `${imageStoryDraft.items[0].title} image story`,
+      ttsVendor: selectedTtsVendor,
+      ttsModel: studioSettings.models.tts,
+      language: studioSettings.language,
+      voice: studioSettings.voice,
+      items,
+    });
+
+    setImageStoryProjects((currentProjects) => [project, ...currentProjects]);
+    setActivePreviewTarget({ kind: 'imagestory', id: project.id });
+    setImageStoryDraft({ title: '', items: [] });
+    closeImageStoryDialog();
+  }
+
+  function updateImageStoryProject(projectId: string, updater: (project: ImageStoryProjectRecord) => ImageStoryProjectRecord) {
+    setImageStoryProjects((currentProjects) => currentProjects.map((project) => (project.id === projectId ? updater(project) : project)));
+  }
+
+  function handleImageStoryItemsChange(projectId: string, items: ImageStoryItem[]) {
+    updateImageStoryProject(projectId, (project) => ({
+      ...project,
+      updatedAt: new Date().toISOString(),
+      currentMessage: 'Image story segments updated. Generate again to rebuild narration.',
+      status: project.status === 'running' ? project.status : 'draft',
+      items,
+    }));
+  }
+
+  async function handleGenerateImageStoryProject(projectId: string) {
+    const project = imageStoryProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project) {
+      return;
+    }
+
+    const apiKey = providerKeys[project.ttsVendor];
+
+    if (!apiKey?.trim()) {
+      updateImageStoryProject(projectId, (currentProject) => ({
+        ...currentProject,
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        currentMessage: `Add the ${getVendorLabel(project.ttsVendor)} API key in Settings before generating this image story.`,
+        error: `Add the ${getVendorLabel(project.ttsVendor)} API key in Settings before generating this image story.`,
+      }));
+      return;
+    }
+
+    if (project.ttsVendor === 'azure' && !providerRegions.azure?.trim()) {
+      updateImageStoryProject(projectId, (currentProject) => ({
+        ...currentProject,
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        currentMessage: 'Add the Azure Speech region in Settings before generating this image story.',
+        error: 'Add the Azure Speech region in Settings before generating this image story.',
+      }));
+      return;
+    }
+
+    updateImageStoryProject(projectId, (currentProject) => ({
+      ...currentProject,
+      status: 'running',
+      updatedAt: new Date().toISOString(),
+      currentMessage: 'Preparing image narration generation.',
+      error: undefined,
+      logs: [
+        {
+          id: `imagestory-log-${globalThis.crypto.randomUUID()}`,
+          createdAt: new Date().toISOString(),
+          message: 'Image story generation started.',
+        },
+        ...currentProject.logs,
+      ],
+    }));
+
+    try {
+      await runImageStoryProject({
+        project,
+        providerKeys,
+        providerRegions,
+        onUpdate: (update) => applyImageStoryProjectUpdate(projectId, update),
+      });
+    } catch {
+      // Updates are applied through the callback.
+    }
+  }
+
+  function applyImageStoryProjectUpdate(projectId: string, update: ImageStoryGenerationUpdate) {
+    updateImageStoryProject(projectId, (project) => ({
+      ...project,
+      status: update.status ?? project.status,
+      updatedAt: new Date().toISOString(),
+      currentMessage: update.currentMessage ?? project.currentMessage,
+      items: update.items ?? project.items,
+      narrationAudio: update.narrationAudio ?? project.narrationAudio,
+      previewVideo: update.previewVideo ?? project.previewVideo,
+      finalVideo: update.finalVideo ?? project.finalVideo,
+      error: update.error ?? project.error,
+      logs: update.log
+        ? [
+            {
+              id: `imagestory-log-${globalThis.crypto.randomUUID()}`,
+              createdAt: new Date().toISOString(),
+              message: update.log,
+            },
+            ...project.logs,
+          ]
+        : project.logs,
+    }));
+  }
+
+  function handleDownloadImageStoryProject(projectId: string) {
+    const project = imageStoryProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project?.finalVideo) {
+      return;
+    }
+
+    downloadBinaryAsset(project.finalVideo, `${slugifyFilename(project.title) || 'clipmind-image-story'}.mp4`);
+  }
+
+  function handleRequestDeleteImageStoryProject(projectId: string) {
+    const project = imageStoryProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project || project.status === 'running') {
+      return;
+    }
+
+    setImageStoryDeleteCandidate(project);
+  }
+
+  function handleConfirmDeleteImageStoryProject() {
+    if (!imageStoryDeleteCandidate) {
+      return;
+    }
+
+    const projectId = imageStoryDeleteCandidate.id;
+    setImageStoryProjects((currentProjects) => currentProjects.filter((project) => project.id !== projectId));
+    setActivePreviewTarget((currentTarget) =>
+      currentTarget?.kind === 'imagestory' && currentTarget.id === projectId ? null : currentTarget,
+    );
+    setImageStoryDeleteCandidate(null);
+  }
+
+  function handleVoiceoverProjectPreview(projectId: string) {
+    const project = voiceoverProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project) {
+      return;
+    }
+
+    setActivePreviewTarget((currentTarget) =>
+      currentTarget?.kind === 'voiceover' && currentTarget.id === projectId ? null : { kind: 'voiceover', id: projectId },
+    );
+  }
+
+  function handleCreateVoiceoverProject() {
+    const source = readyVideoSources.find((currentSource) => currentSource.id === voiceoverDraft.sourceId);
+    const sourceAsset = source ? sourceAssets[source.id] : undefined;
+
+    if (!source || !sourceAsset) {
+      setVoiceoverDialogError('Choose a ready uploaded video source before creating a voiceover project.');
+      return;
+    }
+
+    if (!voiceoverDraft.script.trim()) {
+      setVoiceoverDialogError('Enter the voiceover script before opening the editor.');
+      return;
+    }
+
+    const segments = createVoiceoverSegments(voiceoverDraft.script, sourceAsset.durationSec);
+
+    if (!segments.length) {
+      setVoiceoverDialogError('The script could not be split into editable voiceover segments.');
+      return;
+    }
+
+    const project = createVoiceoverProjectRecord({
+      sourceId: source.id,
+      sourceTitle: source.title,
+      sourceOrigin: source.origin,
+      videoDurationSec: sourceAsset.durationSec,
+      ttsVendor: selectedTtsVendor,
+      ttsModel: studioSettings.models.tts,
+      language: studioSettings.language,
+      voice: studioSettings.voice,
+      script: voiceoverDraft.script.trim(),
+      segments,
+    });
+
+    setVoiceoverProjects((currentProjects) => [project, ...currentProjects]);
+    setActivePreviewTarget({ kind: 'voiceover', id: project.id });
+    setVoiceoverDraft({ sourceId: source.id, script: '' });
+    closeVoiceoverDialog();
+  }
+
+  function updateVoiceoverProject(projectId: string, updater: (project: VoiceoverProjectRecord) => VoiceoverProjectRecord) {
+    setVoiceoverProjects((currentProjects) => currentProjects.map((project) => (project.id === projectId ? updater(project) : project)));
+  }
+
+  function handleVoiceoverSegmentsChange(projectId: string, segments: VoiceoverSegment[]) {
+    updateVoiceoverProject(projectId, (project) => ({
+      ...project,
+      updatedAt: new Date().toISOString(),
+      currentMessage: 'Voiceover segments updated. Generate again to rebuild narration.',
+      status: project.status === 'running' ? project.status : 'draft',
+      script: segments.map((segment) => segment.text.trim()).filter(Boolean).join(' '),
+      segments,
+    }));
+  }
+
+  async function handleRetranscodeSourceAsset(sourceId: string) {
+    const asset = sourceAssets[sourceId];
+    if (!asset) return;
+
+    try {
+      const blob = dataUrlToBlob(asset.dataUrl, asset.mimeType);
+      const transcodedBlob = await transcodeVideoForBrowser(blob);
+      const dataUrl = await blobToDataUrl(transcodedBlob);
+
+      setSourceAssets((current) => ({
+        ...current,
+        [sourceId]: { ...asset, mimeType: 'video/webm', dataUrl },
+      }));
+    } catch {
+      // Retranscode failed silently — source stays as-is.
+    }
+  }
+
+  async function handleGenerateVoiceoverProject(projectId: string) {
+    const project = voiceoverProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project) {
+      return;
+    }
+
+    const sourceAsset = sourceAssets[project.sourceId];
+
+    if (!sourceAsset) {
+      updateVoiceoverProject(projectId, (currentProject) => ({
+        ...currentProject,
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        currentMessage: 'The original source video is no longer available in local cache.',
+        error: 'The original source video is no longer available in local cache.',
+      }));
+      return;
+    }
+
+    const apiKey = providerKeys[project.ttsVendor];
+
+    if (!apiKey?.trim()) {
+      updateVoiceoverProject(projectId, (currentProject) => ({
+        ...currentProject,
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        currentMessage: `Add the ${getVendorLabel(project.ttsVendor)} API key in Settings before generating this voiceover.`,
+        error: `Add the ${getVendorLabel(project.ttsVendor)} API key in Settings before generating this voiceover.`,
+      }));
+      return;
+    }
+
+    if (project.ttsVendor === 'azure' && !providerRegions.azure?.trim()) {
+      updateVoiceoverProject(projectId, (currentProject) => ({
+        ...currentProject,
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        currentMessage: 'Add the Azure Speech region in Settings before generating this voiceover.',
+        error: 'Add the Azure Speech region in Settings before generating this voiceover.',
+      }));
+      return;
+    }
+
+    updateVoiceoverProject(projectId, (currentProject) => ({
+      ...currentProject,
+      status: 'running',
+      updatedAt: new Date().toISOString(),
+      currentMessage: 'Preparing clip-based narration generation.',
+      error: undefined,
+      logs: [
+        {
+          id: `voiceover-log-${globalThis.crypto.randomUUID()}`,
+          createdAt: new Date().toISOString(),
+          message: 'Voiceover generation started.',
+        },
+        ...currentProject.logs,
+      ],
+    }));
+
+    try {
+      await runVoiceoverProject({
+        project,
+        sourceAsset,
+        providerKeys,
+        providerRegions,
+        onUpdate: (update) => applyVoiceoverProjectUpdate(projectId, update),
+      });
+    } catch {
+      // Updates are applied through the callback.
+    }
+  }
+
+  function applyVoiceoverProjectUpdate(projectId: string, update: VoiceoverGenerationUpdate) {
+    updateVoiceoverProject(projectId, (project) => ({
+      ...project,
+      status: update.status ?? project.status,
+      updatedAt: new Date().toISOString(),
+      currentMessage: update.currentMessage ?? project.currentMessage,
+      segments: update.segments ?? project.segments,
+      narrationAudio: update.narrationAudio ?? project.narrationAudio,
+      previewVideo: update.previewVideo ?? project.previewVideo,
+      finalVideo: update.finalVideo ?? project.finalVideo,
+      error: update.error ?? project.error,
+      logs: update.log
+        ? [
+            {
+              id: `voiceover-log-${globalThis.crypto.randomUUID()}`,
+              createdAt: new Date().toISOString(),
+              message: update.log,
+            },
+            ...project.logs,
+          ]
+        : project.logs,
+    }));
+  }
+
+  function handleDownloadVoiceoverProject(projectId: string) {
+    const project = voiceoverProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project?.finalVideo) {
+      return;
+    }
+
+    downloadBinaryAsset(project.finalVideo, `${slugifyFilename(project.title) || 'clipmind-voiceover'}.mp4`);
+  }
+
+  function handleRequestDeleteVoiceoverProject(projectId: string) {
+    const project = voiceoverProjects.find((currentProject) => currentProject.id === projectId);
+
+    if (!project || project.status === 'running') {
+      return;
+    }
+
+    setVoiceoverDeleteCandidate(project);
+  }
+
+  function handleConfirmDeleteVoiceoverProject() {
+    if (!voiceoverDeleteCandidate) {
+      return;
+    }
+
+    const projectId = voiceoverDeleteCandidate.id;
+    setVoiceoverProjects((currentProjects) => currentProjects.filter((project) => project.id !== projectId));
+    setActivePreviewTarget((currentTarget) =>
+      currentTarget?.kind === 'voiceover' && currentTarget.id === projectId ? null : currentTarget,
+    );
+    setVoiceoverDeleteCandidate(null);
+  }
+
   function handleRequestDeleteSource(sourceId: string) {
     const source = sources.find((currentSource) => currentSource.id === sourceId);
 
@@ -722,8 +1474,16 @@ function App() {
 
     const sourceId = sourceDeleteCandidate.id;
     setSources((currentSources) => currentSources.filter((source) => source.id !== sourceId));
+    setSourceAssets((currentAssets) => {
+      const nextAssets = { ...currentAssets };
+      delete nextAssets[sourceId];
+      return nextAssets;
+    });
+    setVoiceoverProjects((currentProjects) => currentProjects.filter((project) => project.sourceId !== sourceId));
     setActivePreviewTarget((currentTarget) =>
-      currentTarget?.kind === 'source' && currentTarget.id === sourceId ? null : currentTarget,
+      currentTarget && ((currentTarget.kind === 'source' && currentTarget.id === sourceId) || (currentTarget.kind === 'voiceover' && voiceoverProjects.some((project) => project.id === currentTarget.id && project.sourceId === sourceId)))
+        ? null
+        : currentTarget,
     );
     setSourceDeleteCandidate(null);
   }
@@ -874,7 +1634,6 @@ function App() {
       <Flex className="workspace-layout" gap="4">
         <Box asChild className="app-rail">
           <nav aria-label="Workspace navigation">
-            <Box className="app-rail-mark" />
             <Flex direction="column" gap="3" className="app-rail-actions">
               <IconButton size="3" radius="large" className="rail-primary-action" aria-label="Create notebook">
                 <PlusIcon />
@@ -1063,7 +1822,26 @@ function App() {
               <Box className="column-scroll preview-column-scroll">
                 <Flex direction="column" gap="3" className="column-body preview-column-body">
                   <Card size="3" variant="surface" className="preview-transcript-card">
-                    {activePreviewVideoAsset && activePreviewVideoUrl ? (
+                    {activePreviewVoiceoverProject && activePreviewVoiceoverSourceAsset ? (
+                      <VoiceoverPreviewEditor
+                        project={activePreviewVoiceoverProject}
+                        sourceAsset={activePreviewVoiceoverSourceAsset}
+                        sourceVideoUrl={activePreviewVoiceoverSourceUrl ?? ''}
+                        renderedVideoUrl={activePreviewVoiceoverRenderedUrl ?? ''}
+                        onGenerate={handleGenerateVoiceoverProject}
+                        onRetranscodeSource={() => handleRetranscodeSourceAsset(activePreviewVoiceoverProject.sourceId)}
+                        onUpdateSegments={handleVoiceoverSegmentsChange}
+                        onDownloadFinalVideo={handleDownloadVoiceoverProject}
+                      />
+                    ) : activePreviewImageStoryProject ? (
+                      <ImageStoryPreviewEditor
+                        project={activePreviewImageStoryProject}
+                        renderedVideoUrl={activePreviewImageStoryRenderedUrl ?? ''}
+                        onGenerate={handleGenerateImageStoryProject}
+                        onUpdateItems={handleImageStoryItemsChange}
+                        onDownloadFinalVideo={handleDownloadImageStoryProject}
+                      />
+                    ) : activePreviewVideoAsset && activePreviewVideoUrl ? (
                       <Flex direction="column" gap="3" className="preview-transcript-shell">
                         <Text size="4" weight="medium">
                           {activePreviewVideoJob?.title ?? 'Generated video'}
@@ -1101,7 +1879,7 @@ function App() {
                           No preview selected
                         </Text>
                         <Text size="2" color="gray" align="center">
-                          Select a ready source or a completed video job to preview it here.
+                          Select a ready source, a completed video job, a voiceover project, or an image story project to preview it here.
                         </Text>
                       </Flex>
                     )}
@@ -1115,19 +1893,45 @@ function App() {
                 <Heading as="h2" size="5" weight="medium">
                   Studio
                 </Heading>
-                <Button
-                  size="2"
-                  radius="large"
-                  variant="soft"
-                  className="studio-trigger-button"
-                  onClick={() => {
-                    setVideoDialogError('');
-                    setIsVideoStudioDialogOpen(true);
-                  }}
-                >
-                  <VideoIcon />
-                  Generate Video
-                </Button>
+                <Flex align="center" gap="2" wrap="wrap">
+                  <Button
+                    size="2"
+                    radius="large"
+                    variant="soft"
+                    className="studio-trigger-button"
+                    onClick={() => {
+                      setVideoDialogError('');
+                      setIsVideoStudioDialogOpen(true);
+                    }}
+                  >
+                    <VideoIcon />
+                    Generate Video
+                  </Button>
+                  <Button
+                    size="2"
+                    radius="large"
+                    variant="soft"
+                    color="gray"
+                    className="studio-trigger-button"
+                    onClick={openVoiceoverDialog}
+                    disabled={!readyVideoSources.length || hasRunningVoiceoverProject}
+                  >
+                    <MixerHorizontalIcon />
+                    Voiceover Video
+                  </Button>
+                  <Button
+                    size="2"
+                    radius="large"
+                    variant="soft"
+                    color="gray"
+                    className="studio-trigger-button"
+                    onClick={openImageStoryDialog}
+                    disabled={hasRunningImageStoryProject}
+                  >
+                    <ImageIcon />
+                    Image Story Video
+                  </Button>
+                </Flex>
               </Flex>
 
               <Box className="studio-section-divider" />
@@ -1135,8 +1939,195 @@ function App() {
               <ScrollArea type="auto" scrollbars="vertical" className="column-scroll">
                 <Flex direction="column" gap="3" className="column-body studio-panel-body">
                   <Box className="studio-task-list-shell">
-                    {videoJobs.length ? (
-                      videoJobs.map((job) => (
+                    {imageStoryProjects.length || voiceoverProjects.length || videoJobs.length ? (
+                      <>
+                        {imageStoryProjects.map((project) => (
+                          <Card
+                            key={project.id}
+                            size="2"
+                            variant="surface"
+                            className="studio-job-card studio-voiceover-card"
+                            data-preview-active={activePreviewTarget?.kind === 'imagestory' && activePreviewTarget.id === project.id ? 'true' : 'false'}
+                            onClick={() => handleImageStoryProjectPreview(project.id)}
+                          >
+                            <Flex direction="column" gap="2">
+                              <Flex align="start" justify="between" gap="3" className="studio-job-summary-row">
+                                <Flex align="start" gap="3" className="studio-job-summary-trigger">
+                                  <Box className="artifact-icon-shell">
+                                    <ImageIcon />
+                                  </Box>
+                                  <Box className="studio-job-summary-copy">
+                                    <Flex align="center" justify="between" gap="3" className="studio-job-title-row">
+                                      <Text size="3" weight="medium">
+                                        {project.title}
+                                      </Text>
+                                      <Badge size="1" radius="full" variant="soft" color={getImageStoryStatusColor(project.status)}>
+                                        {formatImageStoryStatusLabel(project.status)}
+                                      </Badge>
+                                    </Flex>
+                                    <Flex align="center" gap="2" mt="1" wrap="wrap">
+                                      <Text size="1" color="gray">
+                                        {formatJobTimestamp(project.updatedAt)}
+                                      </Text>
+                                      <Text size="1" color="gray">
+                                        {project.items.length} slides · {formatPlanDuration(project.items.at(-1)?.endSec ?? 0)}
+                                      </Text>
+                                    </Flex>
+                                  </Box>
+                                </Flex>
+                              </Flex>
+
+                              {(() => {
+                                const statusMessage = getTaskCardStatusMessage(project.status, project.currentMessage, project.error, 'Image story generation failed.');
+                                return statusMessage ? (
+                                  <Box className="studio-job-progress-pill" data-tone={statusMessage.tone}>
+                                    <Text size="1" className="studio-job-progress-text" title={statusMessage.message}>
+                                      {statusMessage.message}
+                                    </Text>
+                                  </Box>
+                                ) : null;
+                              })()}
+
+                              <Flex justify="end" className="studio-job-footer" onClick={(event) => event.stopPropagation()}>
+                                <DropdownMenu.Root>
+                                  <DropdownMenu.Trigger>
+                                    <IconButton
+                                      radius="full"
+                                      variant="ghost"
+                                      color="gray"
+                                      size="2"
+                                      className="studio-job-menu-trigger"
+                                      aria-label="Open image story menu"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      <DotsHorizontalIcon />
+                                    </IconButton>
+                                  </DropdownMenu.Trigger>
+                                  <DropdownMenu.Content align="end" onCloseAutoFocus={(event) => event.preventDefault()}>
+                                    <DropdownMenu.Item
+                                      disabled={!project.finalVideo}
+                                      onSelect={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handleDownloadImageStoryProject(project.id);
+                                      }}
+                                    >
+                                      <FileIcon />
+                                      Download MP4
+                                    </DropdownMenu.Item>
+                                    <DropdownMenu.Item
+                                      color="red"
+                                      disabled={project.status === 'running'}
+                                      onSelect={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handleRequestDeleteImageStoryProject(project.id);
+                                      }}
+                                    >
+                                      <TrashIcon />
+                                      Delete
+                                    </DropdownMenu.Item>
+                                  </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                              </Flex>
+                            </Flex>
+                          </Card>
+                        ))}
+
+                        {voiceoverProjects.map((project) => (
+                          <Card
+                            key={project.id}
+                            size="2"
+                            variant="surface"
+                            className="studio-job-card studio-voiceover-card"
+                            data-preview-active={activePreviewTarget?.kind === 'voiceover' && activePreviewTarget.id === project.id ? 'true' : 'false'}
+                            onClick={() => handleVoiceoverProjectPreview(project.id)}
+                          >
+                            <Flex direction="column" gap="2">
+                              <Flex align="start" justify="between" gap="3" className="studio-job-summary-row">
+                                <Flex align="start" gap="3" className="studio-job-summary-trigger">
+                                  <Box className="artifact-icon-shell">
+                                    <MixerHorizontalIcon />
+                                  </Box>
+                                  <Box className="studio-job-summary-copy">
+                                    <Flex align="center" justify="between" gap="3" className="studio-job-title-row">
+                                      <Text size="3" weight="medium">
+                                        {project.title}
+                                      </Text>
+                                      <Badge size="1" radius="full" variant="soft" color={getVoiceoverStatusColor(project.status)}>
+                                        {formatVoiceoverStatusLabel(project.status)}
+                                      </Badge>
+                                    </Flex>
+                                    <Flex align="center" gap="2" mt="1" wrap="wrap">
+                                      <Text size="1" color="gray">
+                                        {formatJobTimestamp(project.updatedAt)}
+                                      </Text>
+                                      <Text size="1" color="gray">
+                                        {project.segments.length} segments · {formatPlanDuration(project.videoDurationSec)}
+                                      </Text>
+                                    </Flex>
+                                  </Box>
+                                </Flex>
+                              </Flex>
+
+                              {(() => {
+                                const statusMessage = getTaskCardStatusMessage(project.status, project.currentMessage, project.error, 'Voiceover generation failed.');
+                                return statusMessage ? (
+                                  <Box className="studio-job-progress-pill" data-tone={statusMessage.tone}>
+                                    <Text size="1" className="studio-job-progress-text" title={statusMessage.message}>
+                                      {statusMessage.message}
+                                    </Text>
+                                  </Box>
+                                ) : null;
+                              })()}
+
+                              <Flex justify="end" className="studio-job-footer" onClick={(event) => event.stopPropagation()}>
+                                <DropdownMenu.Root>
+                                  <DropdownMenu.Trigger>
+                                    <IconButton
+                                      radius="full"
+                                      variant="ghost"
+                                      color="gray"
+                                      size="2"
+                                      className="studio-job-menu-trigger"
+                                      aria-label="Open voiceover project menu"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      <DotsHorizontalIcon />
+                                    </IconButton>
+                                  </DropdownMenu.Trigger>
+                                  <DropdownMenu.Content align="end" onCloseAutoFocus={(event) => event.preventDefault()}>
+                                    <DropdownMenu.Item
+                                      disabled={!project.finalVideo}
+                                      onSelect={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handleDownloadVoiceoverProject(project.id);
+                                      }}
+                                    >
+                                      <FileIcon />
+                                      Download MP4
+                                    </DropdownMenu.Item>
+                                    <DropdownMenu.Item
+                                      color="red"
+                                      disabled={project.status === 'running'}
+                                      onSelect={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handleRequestDeleteVoiceoverProject(project.id);
+                                      }}
+                                    >
+                                      <TrashIcon />
+                                      Delete
+                                    </DropdownMenu.Item>
+                                  </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                              </Flex>
+                            </Flex>
+                          </Card>
+                        ))}
+
+                        {videoJobs.map((job) => (
                       <Card
                         key={job.id}
                         size="2"
@@ -1207,13 +2198,16 @@ function App() {
                               </Flex>
                           </Flex>
 
-                            {job.status === 'running' ? (
-                              <Box className="studio-job-progress-pill">
-                                <Text size="1" className="studio-job-progress-text">
-                                  {job.currentMessage}
-                                </Text>
-                              </Box>
-                            ) : null}
+                            {(() => {
+                              const statusMessage = getTaskCardStatusMessage(job.status, job.currentMessage, job.error, 'Video generation failed.');
+                              return statusMessage ? (
+                                <Box className="studio-job-progress-pill" data-tone={statusMessage.tone}>
+                                  <Text size="1" className="studio-job-progress-text" title={statusMessage.message}>
+                                    {statusMessage.message}
+                                  </Text>
+                                </Box>
+                              ) : null;
+                            })()}
 
                             <Flex justify="end" className="studio-job-footer">
                               <DropdownMenu.Root>
@@ -1339,7 +2333,8 @@ function App() {
                             ) : null}
                           </Flex>
                         </Card>
-                      ))
+                      ))}
+                      </>
                     ) : (
                       <Box className="studio-task-empty-state">
                         <Flex direction="column" align="center" gap="2">
@@ -1380,10 +2375,8 @@ function App() {
         <Dialog.Content className="add-source-dialog" maxWidth="920px">
           <Box className="dialog-topbar">
             <Box className="dialog-header">
-              <Dialog.Title>
-                <Heading as="h1" size="6" align="center" weight="medium">
+              <Dialog.Title size="6" align="center" weight="medium">
                   根据以下内容生成音频概览和视频概览
-                </Heading>
               </Dialog.Title>
               <Dialog.Description>
                 <Text size="5" align="center" className="dialog-rotating-line">
@@ -1624,6 +2617,33 @@ function App() {
                       {studioSettings.targetDurationSec} seconds
                     </Text>
                   </Box>
+
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Content mode
+                    </Text>
+                    <Select.Root
+                      value={studioSettings.contentMode}
+                      onValueChange={(value) =>
+                        setStudioSettings((currentSettings) => ({
+                          ...currentSettings,
+                          contentMode: value as StudioSettings['contentMode'],
+                        }))
+                      }
+                    >
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {videoContentModeOptions.map((mode) => (
+                          <Select.Item key={`content-mode-${mode.id}`} value={mode.id}>
+                            {mode.label}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                    <Text size="1" color="gray" mt="2">
+                      {videoContentModeOptions.find((mode) => mode.id === studioSettings.contentMode)?.description}
+                    </Text>
+                  </Box>
                 </Flex>
 
                 <Flex direction={{ initial: 'column', sm: 'row' }} gap="4">
@@ -1719,6 +2739,9 @@ function App() {
               </Text>
 
               {videoGenerationSteps.map((step) => {
+                const isDirectSourceMode = studioSettings.contentMode === 'direct-source';
+                const isDirectBypassedStep = isDirectSourceMode && (step.id === 'extract' || step.id === 'narrative' || step.id === 'storyboard');
+
                 if (!step.kind) {
                   return (
                     <Card key={step.id} size="2" variant="surface">
@@ -1740,6 +2763,26 @@ function App() {
                             ? 'This step runs locally with ffmpeg to combine the generated narration audio and scene images into the final video.'
                             : step.detail}
                         </Text>
+                      </Flex>
+                    </Card>
+                  );
+                }
+
+                if (isDirectBypassedStep) {
+                  return (
+                    <Card key={step.id} size="2" variant="surface">
+                      <Flex direction="column" gap="3">
+                        <Box>
+                          <Text size="1" weight="medium" color="gray">
+                            {step.stepLabel}
+                          </Text>
+                          <Text as="p" size="3" weight="medium" mt="1">
+                            {step.title}
+                          </Text>
+                          <Text as="p" size="2" color="gray" mt="1">
+                            Direct Source mode keeps source wording unchanged and skips this model-driven rewrite step.
+                          </Text>
+                        </Box>
                       </Flex>
                     </Card>
                   );
@@ -1823,6 +2866,387 @@ function App() {
               </Button>
               <Button onClick={handleGenerateVideoPlan} disabled={hasRunningVideoJob}>
                 {hasRunningVideoJob ? 'Video generation running...' : 'Generate video'}
+              </Button>
+            </Flex>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+
+      <Dialog.Root open={isVoiceoverDialogOpen} onOpenChange={(open) => (open ? openVoiceoverDialog() : closeVoiceoverDialog())}>
+        <Dialog.Content className="video-studio-dialog" maxWidth="760px">
+          <Flex align="start" justify="between" gap="3">
+            <Box>
+              <Dialog.Title>
+                <Heading as="h2" size="5" weight="medium">
+                  Voiceover Video
+                </Heading>
+              </Dialog.Title>
+              <Dialog.Description>
+                <Text size="2" color="gray">
+                  Choose a video source, select the TTS voice, and turn your script into editable timeline segments.
+                </Text>
+              </Dialog.Description>
+            </Box>
+            <Dialog.Close>
+              <IconButton radius="full" variant="ghost" color="gray" aria-label="Close voiceover dialog">
+                <Cross2Icon />
+              </IconButton>
+            </Dialog.Close>
+          </Flex>
+
+          <Flex direction="column" gap="4" mt="4">
+            <Card size="2" variant="surface">
+              <Flex direction="column" gap="4">
+                <Flex direction={{ initial: 'column', sm: 'row' }} gap="4">
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Source video
+                    </Text>
+                    <Select.Root value={voiceoverDraft.sourceId} onValueChange={(value) => setVoiceoverDraft((currentDraft) => ({ ...currentDraft, sourceId: value }))}>
+                      <Select.Trigger mt="2" placeholder="Select a ready video source" />
+                      <Select.Content>
+                        {readyVideoSources.map((source) => (
+                          <Select.Item key={`voiceover-source-${source.id}`} value={source.id}>
+                            {source.title}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Output language
+                    </Text>
+                    <Select.Root
+                      value={studioSettings.language}
+                      onValueChange={(value) =>
+                        setStudioSettings((currentSettings) => {
+                          const currentVendor = getModelVendor('tts', currentSettings.models.tts);
+                          const nextVoiceOptions = getVoiceOptionsForVendor(currentVendor, value);
+                          const nextVoice = nextVoiceOptions.includes(currentSettings.voice)
+                            ? currentSettings.voice
+                            : getDefaultVoiceForVendor(currentVendor, value);
+
+                          return {
+                            ...currentSettings,
+                            language: value,
+                            voice: nextVoice,
+                          };
+                        })
+                      }
+                    >
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {languageOptions.map((language) => (
+                          <Select.Item key={`voiceover-language-${language}`} value={language}>
+                            {language}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+                </Flex>
+
+                <Flex direction={{ initial: 'column', sm: 'row' }} gap="4">
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Provider
+                    </Text>
+                    <Select.Root value={selectedTtsVendor} onValueChange={(value) => handleStepProviderChange('tts', value as ModelVendor)}>
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {getStepProviders('tts').map((provider) => (
+                          <Select.Item key={`voiceover-provider-${provider.id}`} value={provider.id}>
+                            {provider.label}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Model
+                    </Text>
+                    <Select.Root value={studioSettings.models.tts} onValueChange={(value) => handleModelChange('tts', value)}>
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {getStepModels('tts', selectedTtsVendor).map((model) => (
+                          <Select.Item key={`voiceover-model-${model.id}`} value={model.id}>
+                            {model.label}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+                </Flex>
+
+                <Box className="video-config-field">
+                  <Text as="label" size="2" weight="medium">
+                    Voice
+                  </Text>
+                  <Select.Root value={studioSettings.voice} onValueChange={(value) => setStudioSettings((currentSettings) => ({ ...currentSettings, voice: value }))}>
+                    <Select.Trigger mt="2" />
+                    <Select.Content>
+                      {availableVoiceOptions.map((voice) => (
+                        <Select.Item key={`voiceover-voice-${voice}`} value={voice}>
+                          {voice}
+                        </Select.Item>
+                      ))}
+                    </Select.Content>
+                  </Select.Root>
+                </Box>
+              </Flex>
+            </Card>
+
+            <Card size="2" variant="surface">
+              <Flex direction="column" gap="3">
+                <Box>
+                  <Text size="2" weight="medium">
+                    Script
+                  </Text>
+                  <Text as="p" size="1" color="gray" mt="1">
+                    We split the script into sentence-level segments so you can control exactly when each line starts playing.
+                  </Text>
+                </Box>
+
+                <TextArea
+                  rows={10}
+                  placeholder="Paste the narration script here. Each sentence becomes an editable timeline segment."
+                  value={voiceoverDraft.script}
+                  onChange={(event) => setVoiceoverDraft((currentDraft) => ({ ...currentDraft, script: event.target.value }))}
+                />
+              </Flex>
+            </Card>
+
+            {voiceoverDialogError ? (
+              <Callout.Root color="amber" variant="soft">
+                <Callout.Icon>
+                  <ExclamationTriangleIcon />
+                </Callout.Icon>
+                <Callout.Text>{voiceoverDialogError}</Callout.Text>
+              </Callout.Root>
+            ) : null}
+
+            <Flex justify="end" gap="3">
+              <Button variant="soft" color="gray" onClick={closeVoiceoverDialog}>
+                Cancel
+              </Button>
+              <Button onClick={handleCreateVoiceoverProject} disabled={!readyVideoSources.length}>
+                Open editor
+              </Button>
+            </Flex>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+
+      <Dialog.Root open={isImageStoryDialogOpen} onOpenChange={(open) => (open ? openImageStoryDialog() : closeImageStoryDialog())}>
+        <Dialog.Content className="video-studio-dialog image-story-dialog" maxWidth="860px">
+          <Flex align="start" justify="between" gap="3" className="image-story-dialog-header">
+            <Box>
+              <Dialog.Title>
+                <Heading as="h2" size="5" weight="medium">
+                  Image Story Video
+                </Heading>
+              </Dialog.Title>
+              <Dialog.Description>
+                <Text size="2" color="gray">
+                  Upload multiple images, write narration for each slide, and generate one synchronized video.
+                </Text>
+              </Dialog.Description>
+            </Box>
+            <Dialog.Close>
+              <IconButton radius="full" variant="ghost" color="gray" aria-label="Close image story dialog">
+                <Cross2Icon />
+              </IconButton>
+            </Dialog.Close>
+          </Flex>
+
+          <Flex direction="column" gap="4" mt="4" className="image-story-dialog-body">
+            <Card size="2" variant="surface" className="image-story-fixed-card">
+              <Flex direction="column" gap="3">
+                <Text size="2" weight="medium">
+                  Project
+                </Text>
+
+                <Box className="video-config-field">
+                  <Text as="label" size="2" weight="medium">
+                    Project title
+                  </Text>
+                  <TextField.Root
+                    mt="2"
+                    placeholder="Image story title"
+                    value={imageStoryDraft.title}
+                    onChange={(event) => setImageStoryDraft((currentDraft) => ({ ...currentDraft, title: event.target.value }))}
+                  />
+                </Box>
+              </Flex>
+            </Card>
+
+            <Card size="2" variant="surface" className="image-story-fixed-card">
+              <Flex direction="column" gap="3">
+                <Text size="2" weight="medium">
+                  Narration settings
+                </Text>
+
+                <Flex direction={{ initial: 'column', sm: 'row' }} gap="4">
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Output language
+                    </Text>
+                    <Select.Root
+                      value={studioSettings.language}
+                      onValueChange={(value) =>
+                        setStudioSettings((currentSettings) => {
+                          const currentVendor = getModelVendor('tts', currentSettings.models.tts);
+                          const nextVoiceOptions = getVoiceOptionsForVendor(currentVendor, value);
+                          const nextVoice = nextVoiceOptions.includes(currentSettings.voice)
+                            ? currentSettings.voice
+                            : getDefaultVoiceForVendor(currentVendor, value);
+
+                          return {
+                            ...currentSettings,
+                            language: value,
+                            voice: nextVoice,
+                          };
+                        })
+                      }
+                    >
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {languageOptions.map((language) => (
+                          <Select.Item key={`imagestory-language-${language}`} value={language}>
+                            {language}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+                </Flex>
+
+                <Flex direction={{ initial: 'column', sm: 'row' }} gap="4">
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Provider
+                    </Text>
+                    <Select.Root value={selectedTtsVendor} onValueChange={(value) => handleStepProviderChange('tts', value as ModelVendor)}>
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {getStepProviders('tts').map((provider) => (
+                          <Select.Item key={`imagestory-provider-${provider.id}`} value={provider.id}>
+                            {provider.label}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Model
+                    </Text>
+                    <Select.Root value={studioSettings.models.tts} onValueChange={(value) => handleModelChange('tts', value)}>
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {getStepModels('tts', selectedTtsVendor).map((model) => (
+                          <Select.Item key={`imagestory-model-${model.id}`} value={model.id}>
+                            {model.label}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+
+                  <Box className="video-config-field">
+                    <Text as="label" size="2" weight="medium">
+                      Voice
+                    </Text>
+                    <Select.Root value={studioSettings.voice} onValueChange={(value) => setStudioSettings((currentSettings) => ({ ...currentSettings, voice: value }))}>
+                      <Select.Trigger mt="2" />
+                      <Select.Content>
+                        {availableVoiceOptions.map((voice) => (
+                          <Select.Item key={`imagestory-voice-${voice}`} value={voice}>
+                            {voice}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                  </Box>
+                </Flex>
+              </Flex>
+            </Card>
+
+            <Card size="2" variant="surface" className="image-story-slides-card">
+              <Flex direction="column" gap="3" className="image-story-slides-content">
+                <Flex align="center" justify="between" gap="3" wrap="wrap">
+                  <Text size="2" weight="medium">
+                    Slides
+                  </Text>
+                  <Button asChild variant="soft" color="gray" size="1">
+                    <label>
+                      <UploadIcon />
+                      Upload images
+                      <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden onChange={handleImageStoryFilesSelected} />
+                    </label>
+                  </Button>
+                </Flex>
+
+                <Flex direction="column" gap="3" className="image-story-draft-list">
+                  {imageStoryDraft.items.length ? (
+                    imageStoryDraft.items.map((item, index) => (
+                      <Card key={item.id} size="1" variant="surface">
+                        <Flex direction={{ initial: 'column', sm: 'row' }} gap="3">
+                          <Box className="image-story-draft-thumb-shell">
+                            <img className="image-story-draft-thumb" src={item.dataUrl} alt={item.title || `Slide ${index + 1}`} />
+                          </Box>
+                          <Flex direction="column" gap="2" className="image-story-draft-fields">
+                            <TextField.Root
+                              size="1"
+                              placeholder={`Slide ${index + 1} title`}
+                              value={item.title}
+                              onChange={(event) => handleImageStoryDraftItemChange(item.id, 'title', event.target.value)}
+                            />
+                            <TextArea
+                              rows={3}
+                              placeholder="What should this image say?"
+                              value={item.text}
+                              onChange={(event) => handleImageStoryDraftItemChange(item.id, 'text', event.target.value)}
+                            />
+                            <Flex justify="end">
+                              <Button variant="ghost" color="red" size="1" onClick={() => handleRemoveImageStoryDraftItem(item.id)}>
+                                <TrashIcon />
+                                Remove
+                              </Button>
+                            </Flex>
+                          </Flex>
+                        </Flex>
+                      </Card>
+                    ))
+                  ) : (
+                    <Text size="2" color="gray">
+                      Upload images first, then enter narration text for each slide.
+                    </Text>
+                  )}
+                </Flex>
+              </Flex>
+            </Card>
+
+            {imageStoryDialogError ? (
+              <Callout.Root color="amber" variant="soft" className="image-story-dialog-error">
+                <Callout.Icon>
+                  <ExclamationTriangleIcon />
+                </Callout.Icon>
+                <Callout.Text>{imageStoryDialogError}</Callout.Text>
+              </Callout.Root>
+            ) : null}
+
+            <Flex justify="end" gap="3" className="image-story-dialog-actions">
+              <Button variant="soft" color="gray" onClick={closeImageStoryDialog}>
+                Cancel
+              </Button>
+              <Button onClick={handleCreateImageStoryProject} disabled={!imageStoryDraft.items.length}>
+                Open editor
               </Button>
             </Flex>
           </Flex>
@@ -1918,6 +3342,56 @@ function App() {
             </AlertDialog.Cancel>
             <AlertDialog.Action>
               <Button color="red" onClick={handleConfirmDeleteVideoJob}>
+                Delete
+              </Button>
+            </AlertDialog.Action>
+          </Flex>
+        </AlertDialog.Content>
+      </AlertDialog.Root>
+
+      <AlertDialog.Root open={Boolean(voiceoverDeleteCandidate)} onOpenChange={(open) => (!open ? setVoiceoverDeleteCandidate(null) : undefined)}>
+        <AlertDialog.Content maxWidth="420px">
+          <AlertDialog.Title>Delete voiceover project?</AlertDialog.Title>
+          <AlertDialog.Description>
+            This removes the voiceover video, narration audio, and logs for{' '}
+            <Text as="span" weight="medium">
+              {voiceoverDeleteCandidate?.title ?? 'this project'}
+            </Text>
+            . This action cannot be undone.
+          </AlertDialog.Description>
+          <Flex justify="end" gap="3" mt="4">
+            <AlertDialog.Cancel>
+              <Button variant="soft" color="gray">
+                Cancel
+              </Button>
+            </AlertDialog.Cancel>
+            <AlertDialog.Action>
+              <Button color="red" onClick={handleConfirmDeleteVoiceoverProject}>
+                Delete
+              </Button>
+            </AlertDialog.Action>
+          </Flex>
+        </AlertDialog.Content>
+      </AlertDialog.Root>
+
+      <AlertDialog.Root open={Boolean(imageStoryDeleteCandidate)} onOpenChange={(open) => (!open ? setImageStoryDeleteCandidate(null) : undefined)}>
+        <AlertDialog.Content maxWidth="420px">
+          <AlertDialog.Title>Delete image story?</AlertDialog.Title>
+          <AlertDialog.Description>
+            This removes the rendered image-story video, narration audio, and logs for{' '}
+            <Text as="span" weight="medium">
+              {imageStoryDeleteCandidate?.title ?? 'this project'}
+            </Text>
+            . This action cannot be undone.
+          </AlertDialog.Description>
+          <Flex justify="end" gap="3" mt="4">
+            <AlertDialog.Cancel>
+              <Button variant="soft" color="gray">
+                Cancel
+              </Button>
+            </AlertDialog.Cancel>
+            <AlertDialog.Action>
+              <Button color="red" onClick={handleConfirmDeleteImageStoryProject}>
                 Delete
               </Button>
             </AlertDialog.Action>
@@ -2528,8 +4002,12 @@ function readStoredStudioSettings(): StudioSettings {
     };
     const selectedTtsVendor = getModelVendor('tts', normalizedSettings.models.tts);
     const voiceOptionsForVendor = getVoiceOptionsForVendor(selectedTtsVendor, normalizedSettings.language);
+    const contentMode = normalizedSettings.contentMode === 'direct-source' || normalizedSettings.contentMode === 'summary'
+      ? normalizedSettings.contentMode
+      : fallbackSettings.contentMode;
     return {
       ...normalizedSettings,
+      contentMode,
       voice: voiceOptionsForVendor.includes(normalizedSettings.voice)
         ? normalizedSettings.voice
         : getDefaultVoiceForVendor(selectedTtsVendor, normalizedSettings.language),
@@ -2564,7 +4042,7 @@ function readStoredPreviewTarget(): PreviewTarget | null {
 
     const parsedValue = JSON.parse(storedValue) as Partial<PreviewTarget>;
 
-    if ((parsedValue.kind === 'source' || parsedValue.kind === 'video') && typeof parsedValue.id === 'string' && parsedValue.id.trim()) {
+    if ((parsedValue.kind === 'source' || parsedValue.kind === 'video' || parsedValue.kind === 'voiceover' || parsedValue.kind === 'imagestory') && typeof parsedValue.id === 'string' && parsedValue.id.trim()) {
       return { kind: parsedValue.kind, id: parsedValue.id };
     }
 
@@ -2665,6 +4143,7 @@ function normalizeStoredProviderKeys(value: unknown): Partial<ProviderKeys> {
     cantoneseai: readStoredString(parsedValue.cantoneseai) ?? '',
     azure: readStoredString(parsedValue.azure) ?? '',
     audiodub: readStoredString(parsedValue.audiodub) ?? '',
+    minimax: readStoredString(parsedValue.minimax) ?? '',
   };
 }
 
@@ -2872,6 +4351,284 @@ function normalizeStoredBinaryAsset(value: unknown): VideoJobRecord['finalVideo'
   return mimeType && dataUrl ? { mimeType, dataUrl } : undefined;
 }
 
+function normalizeStoredSourceAssets(value: unknown): Record<string, SourceMediaAsset> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([sourceId, assetValue]) => {
+      const asset = normalizeStoredSourceMediaAsset(assetValue);
+      return asset ? [[sourceId, asset]] : [];
+    }),
+  );
+}
+
+function normalizeStoredSourceMediaAsset(value: unknown): SourceMediaAsset | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const parsedValue = value as Partial<SourceMediaAsset>;
+  const kind = parsedValue.kind === 'video' || parsedValue.kind === 'audio' ? parsedValue.kind : null;
+  const mimeType = readStoredString(parsedValue.mimeType);
+  const dataUrl = readStoredString(parsedValue.dataUrl);
+
+  if (!kind || !mimeType || !dataUrl || typeof parsedValue.durationSec !== 'number' || !Number.isFinite(parsedValue.durationSec)) {
+    return null;
+  }
+
+  return {
+    kind,
+    mimeType,
+    dataUrl,
+    durationSec: parsedValue.durationSec,
+  };
+}
+
+function normalizeStoredVoiceoverProjects(value: unknown): VoiceoverProjectRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    const project = normalizeStoredVoiceoverProject(entry);
+    return project ? [project] : [];
+  });
+}
+
+function normalizeStoredImageStoryProjects(value: unknown): ImageStoryProjectRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    const project = normalizeStoredImageStoryProject(entry);
+    return project ? [project] : [];
+  });
+}
+
+function normalizeStoredImageStoryProject(value: unknown): ImageStoryProjectRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const parsedValue = value as Partial<ImageStoryProjectRecord>;
+  const id = readStoredString(parsedValue.id);
+  const title = readStoredString(parsedValue.title);
+  const ttsVendor = normalizeModelVendor(parsedValue.ttsVendor);
+  const ttsModel = readStoredString(parsedValue.ttsModel);
+  const language = readStoredString(parsedValue.language);
+  const voice = readStoredString(parsedValue.voice);
+  const items = normalizeStoredImageStoryItems(parsedValue.items);
+
+  if (!id || !title || !ttsVendor || !ttsModel || !language || !voice || !items.length) {
+    return null;
+  }
+
+  const status = normalizeStoredImageStoryStatus(parsedValue.status);
+  const isInterruptedProject = status === 'running';
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    title,
+    status: isInterruptedProject ? 'failed' : status,
+    createdAt: readStoredString(parsedValue.createdAt) ?? timestamp,
+    updatedAt: readStoredString(parsedValue.updatedAt) ?? timestamp,
+    ttsVendor,
+    ttsModel,
+    language,
+    voice,
+    currentMessage:
+      isInterruptedProject
+        ? 'This browser-side image story project was interrupted by a refresh. Generate it again to rebuild the video.'
+        : readStoredString(parsedValue.currentMessage) ?? 'Image story draft restored from local cache.',
+    items,
+    logs: normalizeStoredImageStoryLogs(parsedValue.logs),
+    narrationAudio: normalizeStoredBinaryAsset(parsedValue.narrationAudio),
+    previewVideo: normalizeStoredBinaryAsset(parsedValue.previewVideo),
+    finalVideo: normalizeStoredBinaryAsset(parsedValue.finalVideo),
+    error: isInterruptedProject ? 'This browser-side image story generation was interrupted by a refresh.' : readStoredString(parsedValue.error) ?? undefined,
+  };
+}
+
+function normalizeStoredImageStoryItems(value: unknown): ImageStoryItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const parsedValue = entry as Partial<ImageStoryItem>;
+    const id = readStoredString(parsedValue.id);
+    const title = readStoredString(parsedValue.title);
+    const text = readStoredString(parsedValue.text);
+    const subtitleText = readStoredString(parsedValue.subtitleText);
+    const image = normalizeStoredBinaryAsset(parsedValue.image);
+    const audioClip = normalizeStoredBinaryAsset(parsedValue.audioClip);
+
+    if (!id || !title || !text || !image || typeof parsedValue.startSec !== 'number' || typeof parsedValue.durationSec !== 'number' || typeof parsedValue.endSec !== 'number') {
+      return [];
+    }
+
+    return [
+      {
+        id,
+        title,
+        text,
+        subtitleText: subtitleText ?? text,
+        image,
+        startSec: parsedValue.startSec,
+        durationSec: parsedValue.durationSec,
+        endSec: parsedValue.endSec,
+        audioClip,
+        audioDurationSec: typeof parsedValue.audioDurationSec === 'number' && Number.isFinite(parsedValue.audioDurationSec) ? parsedValue.audioDurationSec : undefined,
+        error: readStoredString(parsedValue.error) ?? undefined,
+      },
+    ];
+  });
+}
+
+function normalizeStoredImageStoryLogs(value: unknown): ImageStoryProjectRecord['logs'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const parsedValue = entry as Partial<ImageStoryProjectRecord['logs'][number]>;
+    const id = readStoredString(parsedValue.id);
+    const message = readStoredString(parsedValue.message);
+    const createdAt = readStoredString(parsedValue.createdAt);
+
+    if (!id || !message || !createdAt) {
+      return [];
+    }
+
+    return [{ id, message, createdAt }];
+  });
+}
+
+function normalizeStoredVoiceoverProject(value: unknown): VoiceoverProjectRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const parsedValue = value as Partial<VoiceoverProjectRecord>;
+  const id = readStoredString(parsedValue.id);
+  const title = readStoredString(parsedValue.title);
+  const sourceId = readStoredString(parsedValue.sourceId);
+  const sourceTitle = readStoredString(parsedValue.sourceTitle);
+  const sourceOrigin = readStoredString(parsedValue.sourceOrigin);
+  const ttsVendor = normalizeModelVendor(parsedValue.ttsVendor);
+  const ttsModel = readStoredString(parsedValue.ttsModel);
+  const language = readStoredString(parsedValue.language);
+  const voice = readStoredString(parsedValue.voice);
+  const script = readStoredString(parsedValue.script);
+
+  if (!id || !title || !sourceId || !sourceTitle || !sourceOrigin || !ttsVendor || !ttsModel || !language || !voice || !script) {
+    return null;
+  }
+
+  const status = normalizeStoredVoiceoverStatus(parsedValue.status);
+  const isInterruptedProject = status === 'running';
+  const timestamp = new Date().toISOString();
+  const segments = normalizeStoredVoiceoverSegments(parsedValue.segments);
+
+  return {
+    id,
+    title,
+    status: isInterruptedProject ? 'failed' : status,
+    createdAt: readStoredString(parsedValue.createdAt) ?? timestamp,
+    updatedAt: readStoredString(parsedValue.updatedAt) ?? timestamp,
+    sourceId,
+    sourceTitle,
+    sourceOrigin,
+    videoDurationSec: typeof parsedValue.videoDurationSec === 'number' && Number.isFinite(parsedValue.videoDurationSec) ? parsedValue.videoDurationSec : 0,
+    ttsVendor,
+    ttsModel,
+    language,
+    voice,
+    script,
+    currentMessage:
+      isInterruptedProject
+        ? 'This browser-side voiceover project was interrupted by a refresh. Generate it again to rebuild the narration.'
+        : readStoredString(parsedValue.currentMessage) ?? 'Voiceover draft restored from local cache.',
+    segments,
+    logs: normalizeStoredVoiceoverLogs(parsedValue.logs),
+    narrationAudio: normalizeStoredBinaryAsset(parsedValue.narrationAudio),
+    previewVideo: normalizeStoredBinaryAsset(parsedValue.previewVideo),
+    finalVideo: normalizeStoredBinaryAsset(parsedValue.finalVideo),
+    error: isInterruptedProject ? 'This browser-side voiceover generation was interrupted by a refresh.' : readStoredString(parsedValue.error) ?? undefined,
+  };
+}
+
+function normalizeStoredVoiceoverSegments(value: unknown): VoiceoverSegment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const parsedValue = entry as Partial<VoiceoverSegment>;
+    const id = readStoredString(parsedValue.id);
+    const text = readStoredString(parsedValue.text);
+    const subtitleText = readStoredString(parsedValue.subtitleText);
+    const audioClip = normalizeStoredBinaryAsset(parsedValue.audioClip);
+
+    if (!id || !text || !subtitleText || typeof parsedValue.startSec !== 'number' || typeof parsedValue.durationSec !== 'number' || typeof parsedValue.endSec !== 'number') {
+      return [];
+    }
+
+    return [
+      {
+        id,
+        text,
+        subtitleText,
+        startSec: parsedValue.startSec,
+        durationSec: parsedValue.durationSec,
+        endSec: parsedValue.endSec,
+        audioClip,
+        audioDurationSec: typeof parsedValue.audioDurationSec === 'number' && Number.isFinite(parsedValue.audioDurationSec) ? parsedValue.audioDurationSec : undefined,
+        error: readStoredString(parsedValue.error) ?? undefined,
+      },
+    ];
+  });
+}
+
+function normalizeStoredVoiceoverLogs(value: unknown): VoiceoverProjectRecord['logs'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const parsedValue = entry as Partial<VoiceoverProjectRecord['logs'][number]>;
+    const id = readStoredString(parsedValue.id);
+    const message = readStoredString(parsedValue.message);
+    const createdAt = readStoredString(parsedValue.createdAt);
+
+    if (!id || !message || !createdAt) {
+      return [];
+    }
+
+    return [{ id, message, createdAt }];
+  });
+}
+
 function normalizeStoredJobLogs(value: unknown): VideoJobRecord['logs'] {
   if (!Array.isArray(value)) {
     return [];
@@ -2905,9 +4662,17 @@ function normalizeJobPhaseStatus(value: unknown, fallback: VideoJobRecord['steps
 }
 
 function normalizeModelVendor(value: unknown): ModelVendor | undefined {
-  return value === 'openai' || value === 'anthropic' || value === 'google' || value === 'mistral' || value === 'cantoneseai' || value === 'azure' || value === 'audiodub'
+  return value === 'openai' || value === 'anthropic' || value === 'google' || value === 'mistral' || value === 'cantoneseai' || value === 'azure' || value === 'audiodub' || value === 'minimax'
     ? value
     : undefined;
+}
+
+function normalizeStoredVoiceoverStatus(value: unknown): VoiceoverProjectRecord['status'] {
+  return value === 'draft' || value === 'running' || value === 'ready' || value === 'failed' ? value : 'draft';
+}
+
+function normalizeStoredImageStoryStatus(value: unknown): ImageStoryProjectRecord['status'] {
+  return value === 'draft' || value === 'running' || value === 'ready' || value === 'failed' ? value : 'draft';
 }
 
 function isVideoJobStepId(value: unknown): value is VideoJobRecord['steps'][number]['id'] {
@@ -2996,6 +4761,8 @@ function normalizeStoredSource(value: unknown): Source[] {
     excerpt,
     summary: includeSummary ? summary : '',
     rawText,
+    mediaKind: source.mediaKind === 'video' || source.mediaKind === 'audio' ? source.mediaKind : undefined,
+    mediaDurationSec: typeof source.mediaDurationSec === 'number' && Number.isFinite(source.mediaDurationSec) ? source.mediaDurationSec : undefined,
     processingProgress,
     error,
   };
@@ -3041,6 +4808,260 @@ function countStoredWords(text: string): number {
 
 function readStoredString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+async function createSourceMediaAsset(
+  file: File,
+  kind: SourceMediaAsset['kind'],
+  onProgress?: (message: string, progress: number) => void,
+): Promise<SourceMediaAsset> {
+  onProgress?.('Reading media metadata.', 2);
+  const durationSec = await readDurationFromFile(file);
+
+  if (kind === 'video') {
+    onProgress?.('Checking browser video compatibility.', 3);
+    const canPlay = await testVideoPlayability(file);
+
+    if (canPlay) {
+      onProgress?.('Reading file data.', 50);
+      return {
+        kind,
+        mimeType: file.type || 'video/mp4',
+        dataUrl: await readFileAsDataUrl(file),
+        durationSec,
+      };
+    }
+
+    const formatNeedsTranscode = needsVideoTranscode(file);
+    onProgress?.(
+      formatNeedsTranscode ? 'Video requires transcoding for browser preview.' : 'Video is not directly playable. Transcoding for browser preview.',
+      4,
+    );
+    const transcodedBlob = await transcodeVideoForBrowser(file, onProgress);
+    onProgress?.('Encoding video for local storage.', 96);
+    const dataUrl = await blobToDataUrl(transcodedBlob);
+    return { kind, mimeType: 'video/webm', dataUrl, durationSec };
+  }
+
+  onProgress?.('Reading file data.', 50);
+  return {
+    kind,
+    mimeType: file.type || 'audio/wav',
+    dataUrl: await readFileAsDataUrl(file),
+    durationSec,
+  };
+}
+
+function needsVideoTranscode(file: File): boolean {
+  const type = file.type.toLowerCase();
+  const name = file.name.toLowerCase();
+  return type.includes('quicktime') || name.endsWith('.mov') || name.endsWith('.hevc');
+}
+
+async function testVideoPlayability(file: File): Promise<boolean> {
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    return await new Promise<boolean>((resolve) => {
+      const video = document.createElement('video');
+      video.preload = 'auto';
+      video.muted = true;
+
+      const timer = window.setTimeout(() => {
+        video.removeAttribute('src');
+        video.load();
+        resolve(false);
+      }, 3000);
+
+      video.onloadeddata = () => {
+        window.clearTimeout(timer);
+        video.removeAttribute('src');
+        video.load();
+        resolve(true);
+      };
+
+      video.onerror = () => {
+        window.clearTimeout(timer);
+        resolve(false);
+      };
+
+      video.src = objectUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function transcodeVideoForBrowser(
+  file: File | Blob,
+  onProgress?: (message: string, progress: number) => void,
+): Promise<Blob> {
+  onProgress?.('Loading local media engine.', 5);
+  const ffmpeg = await loadVideoFfmpeg();
+  const inputName = 'transcode-input.vid';
+  const outputName = 'transcode-output.webm';
+
+  try {
+    onProgress?.('Reading video file.', 10);
+    const inputBytes = new Uint8Array(await file.arrayBuffer());
+    await ffmpeg.writeFile(inputName, inputBytes);
+
+    onProgress?.('Transcoding video to browser-compatible format.', 15);
+    const progressListener = ({ progress }: { progress: number }) => {
+      const pct = Math.max(0, Math.min(1, progress));
+      onProgress?.('Transcoding video to browser-compatible format.', 15 + Math.round(pct * 75));
+    };
+    ffmpeg.on('progress', progressListener);
+
+    try {
+      // Preview-oriented encode profile: faster than high-quality archival transcode.
+      await ffmpeg.exec([
+        '-i', inputName,
+        '-vf', 'fps=24,scale=960:-2:force_original_aspect_ratio=decrease',
+        '-c:v', 'libvpx',
+        '-deadline', 'realtime',
+        '-cpu-used', '8',
+        '-threads', '4',
+        '-b:v', '1200k',
+        '-maxrate', '1800k',
+        '-bufsize', '3600k',
+        '-c:a', 'libvorbis',
+        '-b:a', '96k',
+        '-ac', '2',
+        '-ar', '44100',
+        outputName,
+      ]);
+    } finally {
+      ffmpeg.off('progress', progressListener);
+    }
+
+    onProgress?.('Reading transcoded output.', 92);
+    const output = await ffmpeg.readFile(outputName);
+    const bytes = toUint8Array(output);
+    onProgress?.('Video transcoding complete.', 100);
+    return new Blob([bytes.buffer as ArrayBuffer], { type: 'video/webm' });
+  } finally {
+    try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
+  }
+}
+
+async function readDurationFromFile(file: File): Promise<number> {
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      const element = document.createElement(file.type.startsWith('audio/') ? 'audio' : 'video');
+      element.preload = 'metadata';
+      element.onloadedmetadata = () => {
+        const duration = Number.isFinite(element.duration) ? element.duration : 0;
+        resolve(duration > 0 ? duration : 0);
+      };
+      element.onerror = () => reject(new Error('The uploaded media duration could not be read.'));
+      element.src = objectUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function readFileAsDataUrl(file: File): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('The file could not be read.'));
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatVoiceoverStatusLabel(status: VoiceoverProjectRecord['status']) {
+  if (status === 'draft') {
+    return 'Draft';
+  }
+
+  if (status === 'ready') {
+    return 'Success';
+  }
+
+  if (status === 'running') {
+    return 'Running';
+  }
+
+  return 'Failed';
+}
+
+function getVoiceoverStatusColor(status: VoiceoverProjectRecord['status']) {
+  if (status === 'ready') {
+    return 'green' as const;
+  }
+
+  if (status === 'running') {
+    return 'blue' as const;
+  }
+
+  if (status === 'draft') {
+    return 'gray' as const;
+  }
+
+  return 'red' as const;
+}
+
+function formatImageStoryStatusLabel(status: ImageStoryProjectRecord['status']) {
+  if (status === 'draft') {
+    return 'Draft';
+  }
+
+  if (status === 'ready') {
+    return 'Success';
+  }
+
+  if (status === 'running') {
+    return 'Running';
+  }
+
+  return 'Failed';
+}
+
+function getImageStoryStatusColor(status: ImageStoryProjectRecord['status']) {
+  if (status === 'ready') {
+    return 'green' as const;
+  }
+
+  if (status === 'running') {
+    return 'blue' as const;
+  }
+
+  if (status === 'draft') {
+    return 'gray' as const;
+  }
+
+  return 'red' as const;
+}
+
+function getTaskCardStatusMessage(
+  status: 'draft' | 'running' | 'ready' | 'failed',
+  currentMessage: string | undefined,
+  error: string | undefined,
+  failedFallback: string,
+): { tone: 'progress' | 'error'; message: string } | null {
+  const message = currentMessage?.trim() ?? '';
+  const errorMessage = error?.trim() ?? '';
+
+  if (status === 'running') {
+    return {
+      tone: 'progress',
+      message: message || 'Running.',
+    };
+  }
+
+  if (status === 'failed') {
+    return {
+      tone: 'error',
+      message: errorMessage || message || failedFallback,
+    };
+  }
+
+  return null;
 }
 
 export default App;

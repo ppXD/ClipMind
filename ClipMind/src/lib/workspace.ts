@@ -9,11 +9,16 @@ import type {
   Source,
   SourceKind,
   StudioSettings,
+  VideoContentMode,
   VideoGenerationStepDefinition,
   VideoPlan,
   VideoScene,
   VideoJobRecord,
   VideoJobStep,
+  ImageStoryItem,
+  ImageStoryProjectRecord,
+  VoiceoverProjectRecord,
+  VoiceoverSegment,
 } from '../types/workspace';
 
 export const videoProviderKinds: Array<Exclude<keyof StudioSettings['models'], 'transcription'>> = ['summary', 'script', 'tts', 'image'];
@@ -33,6 +38,22 @@ const cantoneseAiVoiceOptions = ['default'];
 
 const audiodubVoiceOptions = ['209536448462927'];
 
+const minimaxVoiceCatalogByLanguage: Record<string, string[]> = {
+  Cantonese: [
+    'Cantonese_GentleLady',
+    'Cantonese_PlayfulMan',
+    'Cantonese_CuteGirl',
+    'Cantonese_KindWoman',
+    'Cantonese_ProfessionalHost(F)',
+    'Cantonese_ProfessionalHost(M)',
+  ],
+  Mandarin: ['Arrogant_Miss'],
+  English: ['English_expressive_narrator'],
+  Japanese: ['Japanese_KindLady'],
+  Spanish: ['Spanish_Narrator'],
+  French: ['French_MaleNarrator'],
+};
+
 type SourceRecordInput = {
   id?: string;
   kind: SourceKind;
@@ -46,6 +67,18 @@ type SourceRecordInput = {
 };
 
 export const languageOptions = ['English', 'Cantonese', 'Mandarin', 'Japanese', 'Spanish', 'French'];
+export const videoContentModeOptions: Array<{ id: VideoContentMode; label: string; description: string }> = [
+  {
+    id: 'summary',
+    label: 'Summary + Narrative',
+    description: 'Use model summarization and narrative rewrite before storyboard generation.',
+  },
+  {
+    id: 'direct-source',
+    label: 'Direct Source',
+    description: 'Use source text directly, keep wording unchanged, and map segments to visuals.',
+  },
+];
 
 export const providerCatalog: ProviderVendorOption[] = [
   {
@@ -97,6 +130,13 @@ export const providerCatalog: ProviderVendorOption[] = [
     description: 'Multilingual TTS via the Audiodub REST API with MiniMax voice engine.',
     capabilities: ['tts'],
   },
+  {
+    id: 'minimax',
+    label: 'MiniMax',
+    sdk: 'fetch (REST)',
+    description: 'Multilingual TTS via MiniMax text-to-audio API (t2a_v2).',
+    capabilities: ['tts'],
+  },
 ];
 
 export const modelCatalog: Record<keyof StudioSettings['models'], ModelOption[]> = {
@@ -123,6 +163,12 @@ export const modelCatalog: Record<keyof StudioSettings['models'], ModelOption[]>
     { id: 'cantoneseai-tts-turbo', label: 'Cantonese.ai Turbo', note: 'Faster synthesis with turbo model', vendor: 'cantoneseai' },
     { id: 'azure-neural-tts', label: 'Azure Neural TTS', note: 'Azure Speech neural voices with locale-specific options', vendor: 'azure' },
     { id: 'audiodub-minimax', label: 'Audiodub MiniMax', note: 'Multilingual TTS with emotion and style control', vendor: 'audiodub' },
+    { id: 'speech-2.8-turbo', label: 'MiniMax Speech 2.8 Turbo', note: 'Latest fast MiniMax synthesis model', vendor: 'minimax' },
+    { id: 'speech-2.8-hd', label: 'MiniMax Speech 2.8 HD', note: 'Latest high-quality MiniMax synthesis model', vendor: 'minimax' },
+    { id: 'speech-2.6-turbo', label: 'MiniMax Speech 2.6 Turbo', note: 'Balanced quality and speed on MiniMax TTS', vendor: 'minimax' },
+    { id: 'speech-2.6-hd', label: 'MiniMax Speech 2.6 HD', note: 'Higher quality MiniMax voice synthesis', vendor: 'minimax' },
+    { id: 'speech-02-turbo', label: 'MiniMax Speech 02 Turbo', note: 'Legacy fast MiniMax speech model', vendor: 'minimax' },
+    { id: 'speech-02-hd', label: 'MiniMax Speech 02 HD', note: 'Legacy high-quality MiniMax speech model', vendor: 'minimax' },
   ],
   image: [
     { id: 'gpt-image-1', label: 'GPT Image 1', note: 'Editorial still frames', vendor: 'openai' },
@@ -134,6 +180,7 @@ export const defaultStudioSettings: StudioSettings = {
   language: 'English',
   targetDurationSec: 60,
   voice: 'alloy',
+  contentMode: 'summary',
   models: {
     transcription: modelCatalog.transcription[0].id,
     summary: modelCatalog.summary[0].id,
@@ -151,6 +198,7 @@ export const defaultProviderKeys: ProviderKeys = {
   cantoneseai: '',
   azure: '',
   audiodub: '',
+  minimax: '',
 };
 
 export const defaultProviderRegions: ProviderRegions = {
@@ -236,6 +284,97 @@ export function createVideoJobSteps(): VideoJobStep[] {
       logs: [],
     },
   }));
+}
+
+export function createVoiceoverProjectRecord({
+  sourceId,
+  sourceTitle,
+  sourceOrigin,
+  videoDurationSec,
+  ttsVendor,
+  ttsModel,
+  language,
+  voice,
+  script,
+  segments,
+}: {
+  sourceId: string;
+  sourceTitle: string;
+  sourceOrigin: string;
+  videoDurationSec: number;
+  ttsVendor: VoiceoverProjectRecord['ttsVendor'];
+  ttsModel: string;
+  language: string;
+  voice: string;
+  script: string;
+  segments: VoiceoverSegment[];
+}): VoiceoverProjectRecord {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id: `voiceover-${globalThis.crypto.randomUUID()}`,
+    title: `${sourceTitle} voiceover`,
+    status: 'draft',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    sourceId,
+    sourceTitle,
+    sourceOrigin,
+    videoDurationSec,
+    ttsVendor,
+    ttsModel,
+    language,
+    voice,
+    script,
+    currentMessage: 'Review segment timing before generating narration.',
+    segments,
+    logs: [
+      {
+        id: `voiceover-log-${globalThis.crypto.randomUUID()}`,
+        createdAt: timestamp,
+        message: `Created voiceover draft with ${segments.length} segment${segments.length > 1 ? 's' : ''}.`,
+      },
+    ],
+  };
+}
+
+export function createImageStoryProjectRecord({
+  title,
+  ttsVendor,
+  ttsModel,
+  language,
+  voice,
+  items,
+}: {
+  title: string;
+  ttsVendor: ImageStoryProjectRecord['ttsVendor'];
+  ttsModel: string;
+  language: string;
+  voice: string;
+  items: ImageStoryItem[];
+}): ImageStoryProjectRecord {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id: `imagestory-${globalThis.crypto.randomUUID()}`,
+    title: title.trim() || `Image story ${new Date().toLocaleString()}`,
+    status: 'draft',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ttsVendor,
+    ttsModel,
+    language,
+    voice,
+    currentMessage: 'Review image order and narration before generating.',
+    items,
+    logs: [
+      {
+        id: `imagestory-log-${globalThis.crypto.randomUUID()}`,
+        createdAt: timestamp,
+        message: `Created image story draft with ${items.length} slide${items.length > 1 ? 's' : ''}.`,
+      },
+    ],
+  };
 }
 
 export function createSourceId(prefix: SourceKind = 'text'): string {
@@ -341,6 +480,10 @@ export function getVoiceOptionsForVendor(vendor: ProviderVendorOption['id'], lan
 
   if (vendor === 'audiodub') {
     return audiodubVoiceOptions;
+  }
+
+  if (vendor === 'minimax') {
+    return minimaxVoiceCatalogByLanguage[language] ?? minimaxVoiceCatalogByLanguage.English;
   }
 
   return voiceOptions;
