@@ -54,6 +54,10 @@ export function validateTranscriptionFile(file: File): string | null {
   return null;
 }
 
+export function shouldChunkTranscription(file: File): boolean {
+  return requiresChunking(file);
+}
+
 export async function transcribeMediaFile({ apiKey, file, model, onProgress }: TranscriptionRequest): Promise<string> {
   const validationError = validateTranscriptionFile(file);
 
@@ -453,17 +457,20 @@ function isDirectTranscriptionFile(file: File): boolean {
 }
 
 function requiresChunking(file: File): boolean {
-  return isVideoFile(file) || file.size > maxDirectTranscriptionFileBytes;
+  if (isMovFile(file)) {
+    return true;
+  }
+
+  if (file.size > maxDirectTranscriptionFileBytes) {
+    return true;
+  }
+
+  return false;
 }
 
 function isMovFile(file: File): boolean {
   const extension = getFileExtension(file.name);
   return file.type === 'video/quicktime' || movExtensions.has(extension);
-}
-
-function isVideoFile(file: File): boolean {
-  const extension = getFileExtension(file.name);
-  return file.type.startsWith('video/') || extension === 'mp4' || extension === 'webm' || movExtensions.has(extension);
 }
 
 function getFileExtension(fileName: string): string {

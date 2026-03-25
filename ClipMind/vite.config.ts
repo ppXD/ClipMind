@@ -46,10 +46,20 @@ export default defineConfig({
   plugins: [react(), webFetchProxyPlugin()],
   server: {
     proxy: {
+      '/proxy/audiodub-api': {
+        target: 'https://api.audiodub.ai',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/proxy\/audiodub-api/, ''),
+      },
       '/proxy/audiodub-s3': {
         target: 'https://s3.ap-southeast-1.amazonaws.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/proxy\/audiodub-s3/, ''),
+      },
+      '/proxy/minimax-api': {
+        target: 'https://api.minimax.io',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/proxy\/minimax-api/, ''),
       },
     },
   },

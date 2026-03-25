@@ -41,18 +41,13 @@ export default function VoiceoverPreviewEditor({
   const effectiveViewMode = renderedVideoUrl ? viewMode : 'edit';
   const editorVideoSource = effectiveViewMode === 'rendered' && renderedVideoUrl ? renderedVideoUrl : sourceVideoUrl;
   const totalTimelineDuration = Math.max(project.videoDurationSec, project.segments.at(-1)?.endSec ?? 0, 1);
+  const statusMessage = project.status === 'failed' ? project.error?.trim() || project.currentMessage : project.currentMessage;
 
   useEffect(() => {
     if (!activeSubtitle || !segmentListRef.current) return;
     const el = segmentListRef.current.querySelector(`[data-segment-id="${activeSubtitle.id}"]`);
     el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [activeSubtitle]);
-
-  // Reset detection states when the source video URL changes (e.g. after re-encode or re-upload).
-  useEffect(() => {
-    setSourceVideoFailed(false);
-    setIsRetranscoding(false);
-  }, [sourceVideoUrl]);
 
   // Detect unplayable source video (e.g. HEVC or mpeg4 Part 2 codec).
   // Browsers silently render black frames for unsupported codecs without firing onError.
@@ -66,11 +61,13 @@ export default function VoiceoverPreviewEditor({
     function markResolved() {
       resolved = true;
       setSourceVideoFailed(false);
+      setIsRetranscoding(false);
     }
 
     function checkPlayability() {
       if (resolved) return;
       setSourceVideoFailed(true);
+      setIsRetranscoding(false);
     }
 
     video.addEventListener('loadeddata', markResolved);
@@ -154,6 +151,7 @@ export default function VoiceoverPreviewEditor({
                 setViewMode('edit');
               } else {
                 setSourceVideoFailed(true);
+                setIsRetranscoding(false);
               }
             }}
           />
@@ -193,14 +191,18 @@ export default function VoiceoverPreviewEditor({
           <Badge variant="soft" radius="full" color={getProjectBadgeColor(project.status)}>
             {formatProjectStatus(project.status)}
           </Badge>
-          <Text size="1" color="gray">
-            {project.currentMessage}
+          <Text size="1" color={project.status === 'failed' ? 'red' : 'gray'}>
+            {statusMessage}
           </Text>
           <Text size="1" color="gray">
             {project.segments.length} segments · {formatSeconds(totalTimelineDuration)}
           </Text>
         </Flex>
         <Flex align="center" gap="2" wrap="wrap">
+          <Button color="blue" size="1" className="voiceover-generate-button" onClick={() => onGenerate(project.id)} disabled={project.status === 'running'}>
+            {project.status === 'running' ? <ReloadIcon className="spin-icon" /> : <PlayIcon />}
+            {project.status === 'running' ? 'Generating…' : 'Generate'}
+          </Button>
           {project.finalVideo ? (
             <Button variant="soft" color="gray" size="1" onClick={() => onDownloadFinalVideo(project.id)}>
               <DownloadIcon />
@@ -358,12 +360,6 @@ export default function VoiceoverPreviewEditor({
           </Flex>
         </Card>
 
-        <Flex justify="end" className="voiceover-editor-action-row">
-          <Button color="blue" size="2" className="voiceover-generate-button" onClick={() => onGenerate(project.id)} disabled={project.status === 'running'}>
-            {project.status === 'running' ? <ReloadIcon className="spin-icon" /> : <PlayIcon />}
-            {project.status === 'running' ? 'Generating…' : 'Generate VoiceOver'}
-          </Button>
-        </Flex>
       </Box>
     </Flex>
   );
@@ -439,4 +435,3 @@ function getProjectBadgeColor(status: VoiceoverProjectRecord['status']) {
 
   return 'red' as const;
 }
-

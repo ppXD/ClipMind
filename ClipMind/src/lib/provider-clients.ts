@@ -41,5 +41,9 @@ export async function createVendorClient(vendor: ModelVendor, apiKey: string) {
     return createAzureSpeechSdk();
   }
 
+  if (vendor === 'minimax') {
+    throw new Error('MiniMax client is used only for TTS via REST helper in video-orchestrator.');
+  }
+
   return createMistralClient(apiKey);
 }

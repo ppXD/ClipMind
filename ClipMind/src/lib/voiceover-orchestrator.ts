@@ -5,6 +5,7 @@ import {
   generateAudiodubTts,
   generateAzureSpeechTts,
   generateCantoneseAiTts,
+  generateMiniMaxTts,
   generateOpenAiTts,
   loadVideoFfmpeg,
   readMediaDurationFromBlob,
@@ -12,6 +13,7 @@ import {
   toUint8Array,
   uint8ArrayToDataAsset,
 } from './video-orchestrator';
+import { renderSubtitleOverlayImage } from './subtitle-theme';
 import type {
   ProviderKeys,
   ProviderRegions,
@@ -32,6 +34,14 @@ export type VoiceoverGenerationUpdate = {
   error?: string;
   log?: string;
 };
+
+const minDraftSegmentDurationSec = 1.2;
+const minAlignedAudioSegmentDurationSec = 0.2;
+const h264Preset = 'veryfast';
+const h264Crf = '21';
+const h264MaxRate = '5M';
+const h264BufSize = '10M';
+const aacBitrate = '128k';
 
 export async function runVoiceoverProject({
   project,
@@ -61,17 +71,47 @@ export async function runVoiceoverProject({
     const generatedSegments: VoiceoverSegment[] = [];
 
     for (const segment of project.segments) {
-      emitUpdate(onUpdate, {
-        currentMessage: `Generating voice clip ${completedCount + 1} of ${project.segments.length}.`,
-        log: `Generating audio for "${truncateText(segment.text, 80)}".`,
-      });
+      const clipNumber = completedCount + 1;
 
-      const blob = await synthesizeSegmentAudio({
-        project,
-        text: segment.text,
-        providerKeys,
-        providerRegions,
-      });
+      const clipTimerStart = Date.now();
+      let clipPhase = 'Submitting TTS request.';
+      const emitClipProgress = (phase: string, includeLog = true) => {
+        clipPhase = phase;
+        emitUpdate(onUpdate, {
+          currentMessage: `Generating voice clip ${clipNumber} of ${project.segments.length}. ${phase}`,
+          log: includeLog ? `Clip ${clipNumber}/${project.segments.length}: ${phase}` : undefined,
+        });
+      };
+
+      emitClipProgress(`Preparing text "${truncateText(segment.text, 80)}".`);
+      const heartbeatId = window.setInterval(() => {
+        const elapsedSec = Math.max(1, Math.floor((Date.now() - clipTimerStart) / 1000));
+        emitUpdate(onUpdate, {
+          currentMessage: `Generating voice clip ${clipNumber} of ${project.segments.length}. ${clipPhase} (${elapsedSec}s)`,
+        });
+      }, 2000);
+
+      let blob: Blob;
+
+      try {
+        emitClipProgress('Submitting request to TTS provider.');
+        blob = await synthesizeSegmentAudio({
+          project,
+          text: segment.text,
+          providerKeys,
+          providerRegions,
+          onStatus: (status) => emitClipProgress(status),
+        });
+      } catch (error) {
+        const detail = readThrownMessage(error, 'The TTS provider did not return audio.');
+        throw new Error(
+          `Narration clip ${clipNumber}/${project.segments.length} failed with ${formatTtsVendorLabel(project.ttsVendor)} (${project.ttsModel}). ${detail}`,
+        );
+      } finally {
+        window.clearInterval(heartbeatId);
+      }
+
+      emitClipProgress('Audio received. Inspecting clip duration.', false);
       const dataUrl = await blobToDataUrl(blob);
       const audioDurationSec = await readMediaDurationFromBlob(blob, blob.type || 'audio/wav');
 
@@ -87,8 +127,8 @@ export async function runVoiceoverProject({
 
       emitUpdate(onUpdate, {
         segments: alignSegmentsToAudioDurations(generatedSegments, project.segments),
-        currentMessage: `Narration clip ${completedCount} of ${project.segments.length} is ready.`,
-        log: `Clip ${completedCount} ready at ${formatSeconds(audioDurationSec)}.`,
+        currentMessage: `Narration clip ${completedCount} of ${project.segments.length} is ready. Timeline retimed from measured audio.`,
+        log: `Clip ${completedCount} ready at ${formatSeconds(audioDurationSec)}. Segment timeline re-aligned to actual audio length.`,
       });
     }
 
@@ -155,7 +195,7 @@ export function createVoiceoverSegments(script: string, videoDurationSec: number
   let currentStart = 0;
 
   return segments.map((text, index) => {
-    const durationSec = roundSeconds(Math.max(1.2, estimatedDurations[index] * durationScale));
+    const durationSec = roundSeconds(Math.max(minDraftSegmentDurationSec, estimatedDurations[index] * durationScale));
     const startSec = roundSeconds(currentStart);
     const endSec = roundSeconds(startSec + durationSec);
     currentStart = endSec;
@@ -177,13 +217,16 @@ function alignSegmentsToAudioDurations(currentSegments: VoiceoverSegment[], orig
     return updatedSegment ? { ...originalSegment, ...updatedSegment } : originalSegment;
   });
 
-  let nextAvailableStart = 0;
+  let nextAvailableStartSec = 0;
 
   return merged.map((segment) => {
-    const startSec = roundSeconds(Math.max(segment.startSec, nextAvailableStart));
-    const durationSec = roundSeconds(Math.max(segment.durationSec, segment.audioDurationSec ?? 0, 1.2));
+    const hasAudioDuration = typeof segment.audioDurationSec === 'number' && Number.isFinite(segment.audioDurationSec) && segment.audioDurationSec > 0;
+    const startSec = roundSeconds(nextAvailableStartSec);
+    const durationSec = hasAudioDuration
+      ? roundSeconds(Math.max(segment.audioDurationSec ?? 0, minAlignedAudioSegmentDurationSec))
+      : roundSeconds(Math.max(segment.durationSec, minDraftSegmentDurationSec));
     const endSec = roundSeconds(startSec + durationSec);
-    nextAvailableStart = endSec;
+    nextAvailableStartSec = endSec;
 
     return {
       ...segment,
@@ -200,13 +243,16 @@ async function synthesizeSegmentAudio({
   text,
   providerKeys,
   providerRegions,
+  onStatus,
 }: {
   project: VoiceoverProjectRecord;
   text: string;
   providerKeys: ProviderKeys;
   providerRegions: ProviderRegions;
+  onStatus?: (status: string) => void;
 }) {
   if (project.ttsVendor === 'cantoneseai') {
+    onStatus?.('Running Cantonese.ai synthesis.');
     return generateCantoneseAiTts({
       apiKey: providerKeys.cantoneseai,
       text,
@@ -217,6 +263,7 @@ async function synthesizeSegmentAudio({
   }
 
   if (project.ttsVendor === 'azure') {
+    onStatus?.('Running Azure Speech synthesis.');
     return generateAzureSpeechTts({
       apiKey: providerKeys.azure,
       region: providerRegions.azure ?? '',
@@ -227,14 +274,29 @@ async function synthesizeSegmentAudio({
   }
 
   if (project.ttsVendor === 'audiodub') {
+    onStatus?.('Sending request to Audiodub.');
     return generateAudiodubTts({
       apiKey: providerKeys.audiodub,
       text,
       language: project.language,
       voiceId: project.voice,
+      onProgress: onStatus,
     });
   }
 
+  if (project.ttsVendor === 'minimax') {
+    onStatus?.('Sending request to MiniMax.');
+    return generateMiniMaxTts({
+      apiKey: providerKeys.minimax,
+      text,
+      language: project.language,
+      voiceId: project.voice,
+      model: project.ttsModel,
+      onProgress: onStatus,
+    });
+  }
+
+  onStatus?.('Running OpenAI TTS synthesis.');
   return generateOpenAiTts({
     apiKey: providerKeys.openai,
     model: project.ttsModel,
@@ -315,6 +377,7 @@ async function composeVoiceoverVideo({
   const previewName = 'voiceover-preview.webm';
   const outputName = 'voiceover-output.mp4';
   const subtitleName = 'voiceover-subtitles.vtt';
+  const subtitleOverlayNames: string[] = [];
 
   try {
     emitUpdate(onUpdate, {
@@ -327,6 +390,45 @@ async function composeVoiceoverVideo({
 
     const subtitlePayload = buildWebVtt(project.segments);
     await ffmpeg.writeFile(subtitleName, new TextEncoder().encode(subtitlePayload));
+    const subtitleOverlays = project.segments
+      .map((segment, index) => {
+        const subtitleText = (segment.subtitleText || segment.text).trim();
+        if (!subtitleText || segment.endSec <= segment.startSec) {
+          return null;
+        }
+
+        return {
+          subtitleText,
+          startSec: Math.max(0, segment.startSec),
+          endSec: Math.max(segment.endSec, segment.startSec + 0.1),
+          fileName: `voiceover-subtitle-overlay-${index + 1}.png`,
+        };
+      })
+      .filter(Boolean) as Array<{ subtitleText: string; startSec: number; endSec: number; fileName: string }>;
+
+    if (subtitleOverlays.length) {
+      emitUpdate(onUpdate, {
+        currentMessage: `Preparing ${subtitleOverlays.length} subtitle overlay${subtitleOverlays.length > 1 ? 's' : ''}.`,
+        log: `Rendering ${subtitleOverlays.length} subtitle overlay image${subtitleOverlays.length > 1 ? 's' : ''} with the shared subtitle theme.`,
+      });
+    }
+
+    for (const [index, overlay] of subtitleOverlays.entries()) {
+      const dataUrl = await renderSubtitleOverlayImage({
+        subtitleText: overlay.subtitleText,
+        language: project.language,
+      });
+      await ffmpeg.writeFile(overlay.fileName, dataUrlToUint8Array(dataUrl));
+      subtitleOverlayNames.push(overlay.fileName);
+
+      emitUpdate(onUpdate, {
+        log: `Subtitle overlay ${index + 1}/${subtitleOverlays.length} ready.`,
+      });
+    }
+
+    const previewFilterGraph = buildTimedSubtitleOverlayFilterGraph(subtitleOverlays, 2);
+    const finalFilterGraph = buildTimedSubtitleOverlayFilterGraph(subtitleOverlays, 3);
+    const subtitleOverlayInputArgs = subtitleOverlayNames.flatMap((fileName) => ['-i', fileName]);
 
     emitUpdate(onUpdate, {
       currentMessage: 'Encoding browser preview video.',
@@ -338,7 +440,27 @@ async function composeVoiceoverVideo({
     try {
       await execFfmpeg(
         ffmpeg,
-        ['-i', inputVideoName, '-i', narrationName, '-map', '0:v', '-map', '1:a', '-c:v', 'libvpx', '-b:v', '2M', '-c:a', 'libvorbis', '-shortest', previewName],
+        [
+          '-i',
+          inputVideoName,
+          '-i',
+          narrationName,
+          ...subtitleOverlayInputArgs,
+          '-filter_complex',
+          previewFilterGraph,
+          '-map',
+          '[vout]',
+          '-map',
+          '1:a',
+          '-c:v',
+          'libvpx',
+          '-b:v',
+          '2M',
+          '-c:a',
+          'libvorbis',
+          '-shortest',
+          previewName,
+        ],
         undefined,
         'compose',
         'Encoding voiceover preview video.',
@@ -357,14 +479,68 @@ async function composeVoiceoverVideo({
       log: 'Muxing narration track with the original video.',
     });
 
-    await execFfmpeg(
-      ffmpeg,
-      ['-i', inputVideoName, '-i', narrationName, '-map', '0:v', '-map', '1:a', '-c:v', 'mpeg4', '-q:v', '4', '-c:a', 'aac', '-shortest', outputName],
-      undefined,
-      'compose',
-      'Rendering voiceover MP4.',
-      { start: 50, end: 100 },
-    );
+    try {
+      await execFfmpeg(
+        ffmpeg,
+        [
+          '-i', inputVideoName,
+          '-i', narrationName,
+          '-i', subtitleName,
+          ...subtitleOverlayInputArgs,
+          '-filter_complex', finalFilterGraph,
+          '-map', '[vout]',
+          '-map', '1:a',
+          '-map', '2:0',
+          '-c:v', 'libx264',
+          '-preset', h264Preset,
+          '-crf', h264Crf,
+          '-maxrate', h264MaxRate,
+          '-bufsize', h264BufSize,
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-b:a', aacBitrate,
+          '-c:s', 'mov_text',
+          '-disposition:s:0', 'default',
+          '-movflags', '+faststart',
+          '-shortest',
+          outputName,
+        ],
+        undefined,
+        'compose',
+        'Rendering voiceover MP4 (H.264).',
+        { start: 50, end: 100 },
+      );
+    } catch (h264Error) {
+      emitUpdate(onUpdate, {
+        log: `H.264 final encoding unavailable, fallback to MPEG-4: ${readThrownMessage(h264Error, 'Unknown encoding error.')}`,
+      });
+
+      await execFfmpeg(
+        ffmpeg,
+        [
+          '-i', inputVideoName,
+          '-i', narrationName,
+          '-i', subtitleName,
+          ...subtitleOverlayInputArgs,
+          '-filter_complex', finalFilterGraph,
+          '-map', '[vout]',
+          '-map', '1:a',
+          '-map', '2:0',
+          '-c:v', 'mpeg4',
+          '-q:v', '3',
+          '-c:a', 'aac',
+          '-b:a', aacBitrate,
+          '-c:s', 'mov_text',
+          '-disposition:s:0', 'default',
+          '-shortest',
+          outputName,
+        ],
+        undefined,
+        'compose',
+        'Rendering voiceover MP4 (fallback MPEG-4).',
+        { start: 50, end: 100 },
+      );
+    }
 
     const finalOutput = await ffmpeg.readFile(outputName);
     const finalVideo = await uint8ArrayToDataAsset(toUint8Array(finalOutput), 'video/mp4');
@@ -374,7 +550,7 @@ async function composeVoiceoverVideo({
       finalVideo,
     };
   } finally {
-    await cleanupFiles(ffmpeg, [inputVideoName, narrationName, previewName, outputName, subtitleName]);
+    await cleanupFiles(ffmpeg, [inputVideoName, narrationName, previewName, outputName, subtitleName, ...subtitleOverlayNames]);
   }
 }
 
@@ -408,6 +584,30 @@ function truncateText(value: string, limit: number) {
   return `${value.slice(0, limit - 1).trimEnd()}…`;
 }
 
+function formatTtsVendorLabel(vendor: VoiceoverProjectRecord['ttsVendor']) {
+  if (vendor === 'openai') {
+    return 'OpenAI';
+  }
+
+  if (vendor === 'azure') {
+    return 'Azure Speech';
+  }
+
+  if (vendor === 'cantoneseai') {
+    return 'Cantonese.ai';
+  }
+
+  if (vendor === 'audiodub') {
+    return 'Audiodub';
+  }
+
+  if (vendor === 'minimax') {
+    return 'MiniMax';
+  }
+
+  return vendor;
+}
+
 function getAudioExtension(mimeType = 'audio/wav') {
   if (mimeType.includes('mpeg') || mimeType.includes('mp3')) {
     return 'mp3';
@@ -432,6 +632,29 @@ function getVideoExtension(mimeType = 'video/mp4') {
   return 'mp4';
 }
 
+function buildTimedSubtitleOverlayFilterGraph(
+  overlays: Array<{ startSec: number; endSec: number }>,
+  firstOverlayInputIndex: number,
+) {
+  const steps = ['[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v0]'];
+
+  if (!overlays.length) {
+    steps.push('[v0]format=yuv420p[vout]');
+    return steps.join(';');
+  }
+
+  for (const [index, overlay] of overlays.entries()) {
+    const startSec = overlay.startSec.toFixed(3);
+    const endSec = overlay.endSec.toFixed(3);
+    const overlayInputIndex = firstOverlayInputIndex + index;
+    steps.push(
+      `[v${index}][${overlayInputIndex}:v]overlay=0:0:enable='between(t,${startSec},${endSec})'[v${index + 1}]`,
+    );
+  }
+
+  steps.push(`[v${overlays.length}]format=yuv420p[vout]`);
+  return steps.join(';');
+}
 
 function buildWebVtt(segments: VoiceoverSegment[]) {
   const body = segments.map((segment, index) => {

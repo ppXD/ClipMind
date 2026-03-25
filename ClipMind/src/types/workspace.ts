@@ -5,8 +5,9 @@ export type SourceStatus = 'analyzing' | 'ready' | 'failed';
 export type SourceMediaKind = 'video' | 'audio';
 
 export type ProviderKind = 'summary' | 'script' | 'tts' | 'image' | 'transcription';
+export type VideoContentMode = 'summary' | 'direct-source';
 
-export type ModelVendor = 'openai' | 'anthropic' | 'google' | 'mistral' | 'cantoneseai' | 'azure' | 'audiodub';
+export type ModelVendor = 'openai' | 'anthropic' | 'google' | 'mistral' | 'cantoneseai' | 'azure' | 'audiodub' | 'minimax';
 
 export type ProviderKeys = Record<ModelVendor, string>;
 
@@ -53,6 +54,7 @@ export type StudioSettings = {
   language: string;
   targetDurationSec: number;
   voice: string;
+  contentMode: VideoContentMode;
   models: Record<ProviderKind, string>;
 };
 
@@ -162,6 +164,8 @@ export type VideoJobRecord = {
 
 export type VoiceoverProjectStatus = 'draft' | 'running' | 'ready' | 'failed';
 
+export type ImageStoryProjectStatus = 'draft' | 'running' | 'ready' | 'failed';
+
 export type VoiceoverSegment = {
   id: string;
   text: string;
@@ -175,6 +179,12 @@ export type VoiceoverSegment = {
 };
 
 export type VoiceoverProjectLog = {
+  id: string;
+  message: string;
+  createdAt: string;
+};
+
+export type ImageStoryProjectLog = {
   id: string;
   message: string;
   createdAt: string;
@@ -198,6 +208,39 @@ export type VoiceoverProjectRecord = {
   currentMessage: string;
   segments: VoiceoverSegment[];
   logs: VoiceoverProjectLog[];
+  narrationAudio?: VideoBinaryAsset;
+  previewVideo?: VideoBinaryAsset;
+  finalVideo?: VideoBinaryAsset;
+  error?: string;
+};
+
+export type ImageStoryItem = {
+  id: string;
+  title: string;
+  image: VideoBinaryAsset;
+  text: string;
+  subtitleText?: string;
+  startSec: number;
+  durationSec: number;
+  endSec: number;
+  audioClip?: VideoBinaryAsset;
+  audioDurationSec?: number;
+  error?: string;
+};
+
+export type ImageStoryProjectRecord = {
+  id: string;
+  title: string;
+  status: ImageStoryProjectStatus;
+  createdAt: string;
+  updatedAt: string;
+  language: string;
+  ttsVendor: ModelVendor;
+  ttsModel: string;
+  voice: string;
+  currentMessage: string;
+  items: ImageStoryItem[];
+  logs: ImageStoryProjectLog[];
   narrationAudio?: VideoBinaryAsset;
   previewVideo?: VideoBinaryAsset;
   finalVideo?: VideoBinaryAsset;
